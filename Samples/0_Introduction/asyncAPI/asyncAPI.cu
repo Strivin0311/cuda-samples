@@ -80,7 +80,7 @@ int main(int argc, char *argv[])
     int nbytes = n * sizeof(int);
     int value  = 26;
 
-    // allocate host memory
+    // allocate page-locked (pinned) host memory
     int *a = 0;
     checkCudaErrors(cudaMallocHost((void **)&a, nbytes));
     memset(a, 0, nbytes);
@@ -110,9 +110,9 @@ int main(int argc, char *argv[])
     checkCudaErrors(cudaProfilerStart());
     sdkStartTimer(&timer);
     cudaEventRecord(start, 0);
-    cudaMemcpyAsync(d_a, a, nbytes, cudaMemcpyHostToDevice, 0);
+    cudaMemcpyAsync(d_a, a, nbytes, cudaMemcpyHostToDevice, 0); // since a is page-locked, this is a DMA copy w/o CPU involved
     increment_kernel<<<blocks, threads, 0, 0>>>(d_a, value);
-    cudaMemcpyAsync(a, d_a, nbytes, cudaMemcpyDeviceToHost, 0);
+    cudaMemcpyAsync(a, d_a, nbytes, cudaMemcpyDeviceToHost, 0); // since a is page-locked, this is a DMA copy w/o CPU involved
     cudaEventRecord(stop, 0);
     sdkStopTimer(&timer);
     checkCudaErrors(cudaProfilerStop());
@@ -137,7 +137,7 @@ int main(int argc, char *argv[])
     // release resources
     checkCudaErrors(cudaEventDestroy(start));
     checkCudaErrors(cudaEventDestroy(stop));
-    checkCudaErrors(cudaFreeHost(a));
+    checkCudaErrors(cudaFreeHost(a)); // release page-locked (pinned) host memory
     checkCudaErrors(cudaFree(d_a));
 
     exit(bFinalResults ? EXIT_SUCCESS : EXIT_FAILURE);
