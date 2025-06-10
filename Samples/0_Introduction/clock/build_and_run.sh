@@ -3,12 +3,12 @@
 SEP="--------------------------------------------------------------------"
 
 BUILD_ROOT=build
-TARGET=asyncAPI
+TARGET=clock
 
 # default not skip any step
 SKIP_BUILD=false
 SKIP_RUN=false
-SKIP_PROFILE=false
+SKIP_PROFILE=true
 
 # parse command line arguments
 while [[ $# -gt 0 ]]; do

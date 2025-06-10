@@ -40,6 +40,7 @@
 // includes CUDA Runtime
 #include <cuda_profiler_api.h>
 #include <cuda_runtime.h>
+#include "nvtx3/nvToolsExt.h"
 
 // includes, project
 #include <helper_cuda.h>
@@ -110,9 +111,19 @@ int main(int argc, char *argv[])
     checkCudaErrors(cudaProfilerStart());
     sdkStartTimer(&timer);
     cudaEventRecord(start, 0);
+    
+    nvtxRangePushA("H2D Copy");
     cudaMemcpyAsync(d_a, a, nbytes, cudaMemcpyHostToDevice, 0); // since a is page-locked, this is a DMA copy w/o CPU involved
+    nvtxRangePop();
+
+    nvtxRangePushA("Inc Kernel");
     increment_kernel<<<blocks, threads, 0, 0>>>(d_a, value);
+    nvtxRangePop();
+
+    nvtxRangePushA("D2H Copy");
     cudaMemcpyAsync(a, d_a, nbytes, cudaMemcpyDeviceToHost, 0); // since a is page-locked, this is a DMA copy w/o CPU involved
+    nvtxRangePop();
+    
     cudaEventRecord(stop, 0);
     sdkStopTimer(&timer);
     checkCudaErrors(cudaProfilerStop());
