@@ -3,7 +3,7 @@
 SEP="--------------------------------------------------------------------"
 
 BUILD_ROOT=build
-TARGET=fp16ScalarProduct
+TARGET=matrixMul
 
 # default not skip any step
 SKIP_BUILD=false

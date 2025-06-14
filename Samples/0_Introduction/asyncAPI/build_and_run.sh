@@ -8,7 +8,7 @@ TARGET=asyncAPI
 # default not skip any step
 SKIP_BUILD=false
 SKIP_RUN=false
-SKIP_PROFILE=true
+SKIP_PROFILE=false
 
 # parse command line arguments
 while [[ $# -gt 0 ]]; do

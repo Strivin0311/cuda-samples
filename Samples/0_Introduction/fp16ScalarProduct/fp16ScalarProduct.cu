@@ -28,6 +28,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <cuda_profiler_api.h>
+#include "nvtx3/nvToolsExt.h"
 
 #include "cuda_fp16.h"
 #include "helper_cuda.h"
@@ -180,19 +182,27 @@ int main(int argc, char *argv[])
         checkCudaErrors(cudaMemcpy(devVec[i], vec[i], size * sizeof *vec[i], cudaMemcpyHostToDevice));
     }
 
+    checkCudaErrors(cudaProfilerStart());
+
+    nvtxRangePushA("Native Half2 DotProduct Kernel");
     scalarProductKernel_native<<<NUM_OF_BLOCKS, NUM_OF_THREADS>>>(devVec[0], devVec[1], devResults, size);
+    nvtxRangePop();
+
+    nvtxRangePushA("Intrinsics Half2 DotProduct Kernel");
+    scalarProductKernel_intrinsics<<<NUM_OF_BLOCKS, NUM_OF_THREADS>>>(devVec[0], devVec[1], devResults, size);
+    nvtxRangePop();
+
+    checkCudaErrors(cudaProfilerStop());
 
     checkCudaErrors(cudaMemcpy(results, devResults, NUM_OF_BLOCKS * sizeof *results, cudaMemcpyDeviceToHost));
+    checkCudaErrors(cudaMemcpy(results, devResults, NUM_OF_BLOCKS * sizeof *results, cudaMemcpyDeviceToHost));
 
+    checkCudaErrors(cudaDeviceSynchronize());
     float result_native = 0;
     for (int i = 0; i < NUM_OF_BLOCKS; ++i) {
         result_native += results[i];
     }
     printf("Result native operators\t: %f \n", result_native);
-
-    scalarProductKernel_intrinsics<<<NUM_OF_BLOCKS, NUM_OF_THREADS>>>(devVec[0], devVec[1], devResults, size);
-
-    checkCudaErrors(cudaMemcpy(results, devResults, NUM_OF_BLOCKS * sizeof *results, cudaMemcpyDeviceToHost));
 
     float result_intrinsics = 0;
     for (int i = 0; i < NUM_OF_BLOCKS; ++i) {

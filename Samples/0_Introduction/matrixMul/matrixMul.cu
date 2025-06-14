@@ -42,10 +42,12 @@
 // System includes
 #include <assert.h>
 #include <stdio.h>
+#include <string>
 
 // CUDA runtime
 #include <cuda_profiler_api.h>
 #include <cuda_runtime.h>
+#include "nvtx3/nvToolsExt.h"
 
 // Helper functions and utilities to work with CUDA
 #include <helper_cuda.h>
@@ -206,12 +208,20 @@ int MatrixMultiply(int argc, char **argv, int block_size, const dim3 &dimsA, con
     int nIter = 300;
 
     for (int j = 0; j < nIter; j++) {
+        std::string message = "iter " + std::to_string(j);
+        
+        nvtxRangePushA(message.c_str());
         if (block_size == 16) {
+            nvtxRangePushA("MatrixMul-16");
             MatrixMulCUDA<16><<<grid, threads, 0, stream>>>(d_C, d_A, d_B, dimsA.x, dimsB.x);
+            nvtxRangePop();
         }
         else {
+            nvtxRangePushA("MatrixMul-32");
             MatrixMulCUDA<32><<<grid, threads, 0, stream>>>(d_C, d_A, d_B, dimsA.x, dimsB.x);
+            nvtxRangePop();
         }
+        nvtxRangePop();
     }
 
     // Record the stop event
@@ -227,10 +237,10 @@ int MatrixMultiply(int argc, char **argv, int block_size, const dim3 &dimsA, con
     float  msecPerMatrixMul = msecTotal / nIter;
     double flopsPerMatrixMul =
         2.0 * static_cast<double>(dimsA.x) * static_cast<double>(dimsA.y) * static_cast<double>(dimsB.x);
-    double gigaFlops = (flopsPerMatrixMul * 1.0e-9f) / (msecPerMatrixMul / 1000.0f);
-    printf("Performance= %.2f GFlop/s, Time= %.3f msec, Size= %.0f Ops,"
+    double teraFlops = (flopsPerMatrixMul * 1.0e-12f) / (msecPerMatrixMul / 1000.0f);
+    printf("Performance= %.2f TFlop/s, Time= %.3f msec, Size= %.0f Ops,"
            " WorkgroupSize= %u threads/block\n",
-           gigaFlops,
+           teraFlops,
            msecPerMatrixMul,
            flopsPerMatrixMul,
            threads.x * threads.y);
