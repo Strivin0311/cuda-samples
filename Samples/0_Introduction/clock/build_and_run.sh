@@ -50,12 +50,13 @@ else
 fi
 
 # run
+
+CMD=./$BUILD_ROOT/$TARGET
+
 if [ "$SKIP_RUN" = false ]; then
     echo "$SEP"
     echo "Running ${TARGET}"
     echo "$SEP"
-
-    CMD=./$BUILD_ROOT/$TARGET
     $CMD
 else
     echo "$SEP"
@@ -73,7 +74,7 @@ if [ "$SKIP_PROFILE" = false ]; then
         --force-overwrite true \
         -o ${TARGET}.nsys-rep \
         --capture-range=cudaProfilerApi \
-        ./$BUILD_ROOT/$TARGET
+        $CMD
 else
     echo "$SEP"
     echo "Skipping profiling process"

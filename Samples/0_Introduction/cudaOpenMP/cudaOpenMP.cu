@@ -53,9 +53,11 @@ int correctResult(int *data, const int n, const int b)
     return 1;
 }
 
+#define N 2
+
 int main(int argc, char *argv[])
 {
-    int num_gpus = 0; // number of CUDA GPUs
+    int num_gpus = 8; // number of CUDA GPUs
 
     printf("%s Starting...\n\n", argv[0]);
 
@@ -106,22 +108,19 @@ int main(int argc, char *argv[])
     //   portion of the data.  It's possible to use more CPU threads
     //   than there are CUDA devices, in which case several CPU
     //   threads will be allocating resources and launching kernels
-    //   on the same device.  For example, try omp_set_num_threads(2*num_gpus);
-    //   Recall that all variables declared inside an "omp parallel" scope are
-    //   local to each CPU thread
-    //
-    omp_set_num_threads(num_gpus); // create as many CPU threads as there are CUDA devices
-// omp_set_num_threads(2*num_gpus);// create twice as many CPU threads as there
-// are CUDA devices
-#pragma omp parallel
+    //   on the same device. For example, try omp_set_num_threads(2*num_gpus);
+    // REVIEW: why the API does not work, for I always run into only a single thread ?
+    omp_set_num_threads(N * num_gpus); // create Nx as many CPU threads as there are CUDA devices
+    
+    //  Recall that all variables declared inside an "omp parallel" scope are local to each CPU thread
+    #pragma omp parallel
     {
         unsigned int cpu_thread_id   = omp_get_thread_num();
         unsigned int num_cpu_threads = omp_get_num_threads();
 
         // set and check the CUDA device for this CPU thread
         int gpu_id = -1;
-        checkCudaErrors(
-            cudaSetDevice(cpu_thread_id % num_gpus)); // "% num_gpus" allows more CPU threads than GPU devices
+        checkCudaErrors(cudaSetDevice(cpu_thread_id % num_gpus)); // "% num_gpus" allows more CPU threads than GPU devices
         checkCudaErrors(cudaGetDevice(&gpu_id));
         printf("CPU thread %d (of %d) uses CUDA device %d\n", cpu_thread_id, num_cpu_threads, gpu_id);
 

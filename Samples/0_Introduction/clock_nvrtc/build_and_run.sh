@@ -3,7 +3,7 @@
 SEP="--------------------------------------------------------------------"
 
 BUILD_ROOT=build
-TARGET=asyncAPI
+TARGET=clock_nvrtc
 
 # default not skip any step
 SKIP_BUILD=false
