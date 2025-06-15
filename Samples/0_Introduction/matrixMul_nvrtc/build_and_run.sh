@@ -37,7 +37,7 @@ if [ "$SKIP_BUILD" = false ]; then
     echo "Building ${TARGET}"
     echo "$SEP"
 
-    mkdir -p $BUILD_ROOT && cd $BUILD_ROOT || exit
+    rm -rf $BUILD_ROOT && mkdir -p $BUILD_ROOT && cd $BUILD_ROOT || exit
 
     cmake ..
     make -j8 || exit

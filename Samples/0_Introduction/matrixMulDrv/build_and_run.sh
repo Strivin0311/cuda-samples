@@ -3,7 +3,7 @@
 SEP="--------------------------------------------------------------------"
 
 BUILD_ROOT=build
-TARGET=cudaOpenMP
+TARGET=matrixMulDrv
 
 # default not skip any step
 SKIP_BUILD=false
@@ -51,9 +51,9 @@ fi
 
 # run
 
-# REVIEW: why the env variable does not work, for I always run into only a single thread ?
-# export OMP_NUM_THREADS=4
-CMD=./$BUILD_ROOT/$TARGET
+cd $BUILD_ROOT
+
+CMD="./$TARGET"
 
 if [ "$SKIP_RUN" = false ]; then
     echo "$SEP"

@@ -65,6 +65,7 @@
 
 #include "matrixMul.h"
 
+#define LAUNCH_KERNEL_SIMPLE
 
 ////////////////////////////////////////////////////////////////////////////////
 // declaration, forward
@@ -86,6 +87,7 @@ CUdevice  cuDevice;
 CUcontext cuContext;
 CUmodule  cuModule;
 size_t    totalGlobalMem;
+size_t    totalGlobalGigaMem;
 
 const char *sSDKsample = "matrixMulDrv (Driver API)";
 
@@ -166,26 +168,27 @@ void runTest(int argc, char **argv)
     dim3 block(block_size, block_size, 1);
     dim3 grid(WC / block_size, HC / block_size, 1);
 
-    if (1) {
+    #ifdef LAUNCH_KERNEL_SIMPLE
         // This is the new CUDA 4.0 API for Kernel Parameter passing and Kernel
         // Launching (simplier method)
         size_t Matrix_Width_A = (size_t)WA;
         size_t Matrix_Width_B = (size_t)WB;
         void  *args[5]        = {&d_C, &d_A, &d_B, &Matrix_Width_A, &Matrix_Width_B};
         // new CUDA 4.0 Driver API Kernel launch call
-        checkCudaErrors(cuLaunchKernel(matrixMul,
-                                       grid.x,
-                                       grid.y,
-                                       grid.z,
-                                       block.x,
-                                       block.y,
-                                       block.z,
-                                       2 * block_size * block_size * sizeof(float),
-                                       NULL,
-                                       args,
-                                       NULL));
-    }
-    else {
+        checkCudaErrors(cuLaunchKernel(
+            matrixMul,
+            grid.x,
+            grid.y,
+            grid.z,
+            block.x,
+            block.y,
+            block.z,
+            2 * block_size * block_size * sizeof(float),
+            NULL,
+            args,
+            NULL
+        ));
+    #else
         // This is the new CUDA 4.0 API for Kernel Parameter passing and Kernel
         // Launching (advanced method)
         int  offset = 0;
@@ -209,21 +212,28 @@ void runTest(int argc, char **argv)
         offset += sizeof(Matrix_Width_B);
 
         void *kernel_launch_config[5] = {
-            CU_LAUNCH_PARAM_BUFFER_POINTER, argBuffer, CU_LAUNCH_PARAM_BUFFER_SIZE, &offset, CU_LAUNCH_PARAM_END};
+            CU_LAUNCH_PARAM_BUFFER_POINTER, 
+            argBuffer, 
+            CU_LAUNCH_PARAM_BUFFER_SIZE, 
+            &offset, 
+            CU_LAUNCH_PARAM_END
+        };
 
         // new CUDA 4.0 Driver API Kernel launch call
-        checkCudaErrors(cuLaunchKernel(matrixMul,
-                                       grid.x,
-                                       grid.y,
-                                       grid.z,
-                                       block.x,
-                                       block.y,
-                                       block.z,
-                                       2 * block_size * block_size * sizeof(float),
-                                       NULL,
-                                       NULL,
-                                       reinterpret_cast<void **>(&kernel_launch_config)));
-    }
+        checkCudaErrors(cuLaunchKernel(
+            matrixMul,
+            grid.x,
+            grid.y,
+            grid.z,
+            block.x,
+            block.y,
+            block.z,
+            2 * block_size * block_size * sizeof(float),
+            NULL,
+            NULL,
+            reinterpret_cast<void **>(&kernel_launch_config
+        )));
+    #endif
 
     // copy result from device to host
     checkCudaErrors(cuMemcpyDtoH(reinterpret_cast<void *>(h_C), d_C, mem_size_C));
@@ -255,12 +265,16 @@ void runTest(int argc, char **argv)
     checkCudaErrors(cuMemFree(d_A));
     checkCudaErrors(cuMemFree(d_B));
     checkCudaErrors(cuMemFree(d_C));
+
+    // Destroy CUDA context
     checkCudaErrors(cuCtxDestroy(cuContext));
 }
 
 // Allocates a matrix with random float entries.
 void randomInit(float *data, int size)
 {
+    // rand() returns a random integer between 0 and RAND_MAX
+    // thus we divide by RAND_MAX to get a range between 0.0f and 1.0f
     for (int i = 0; i < size; ++i) {
         data[i] = rand() / static_cast<float>(RAND_MAX);
     }
@@ -273,6 +287,7 @@ static int initCUDA(int argc, char **argv, CUfunction *pMatrixMul, int *blk_size
     char              deviceName[100];
     CUctxCreateParams ctxCreateParams = {};
 
+    // CudadDeviceDRV denotes cuda device driver
     cuDevice = findCudaDeviceDRV(argc, (const char **)argv);
 
     // get compute capabilities and the devicename
@@ -282,9 +297,10 @@ static int initCUDA(int argc, char **argv, CUfunction *pMatrixMul, int *blk_size
     printf("> GPU Device has SM %d.%d compute capability\n", major, minor);
 
     checkCudaErrors(cuDeviceTotalMem(&totalGlobalMem, cuDevice));
-    printf("  Total amount of global memory:     %llu bytes\n", (long long unsigned int)totalGlobalMem);
+    totalGlobalGigaMem = totalGlobalMem >> 30;
+    printf("  Total amount of global memory:     %llu GB\n", (long long unsigned int)totalGlobalGigaMem);
 
-    checkCudaErrors(cuCtxCreate(&cuContext, &ctxCreateParams, 0, cuDevice));
+    checkCudaErrors(cuCtxCreate(&cuContext, 0, cuDevice));
 
     // first search for the module path before we load the results
     std::string        module_path;
@@ -303,6 +319,7 @@ static int initCUDA(int argc, char **argv, CUfunction *pMatrixMul, int *blk_size
     }
 
     // Create module from binary file (FATBIN)
+    // FATBIN includes the PTX code and other metadata such as function signatures
     checkCudaErrors(cuModuleLoadData(&cuModule, fatbin.str().c_str()));
 
     // select the suitable kernel function
@@ -314,11 +331,19 @@ static int initCUDA(int argc, char **argv, CUfunction *pMatrixMul, int *blk_size
         int threadsPerBlock = 0;
         int blocksPerGrid   = 0;
 
-        checkCudaErrors(cuModuleGetFunction(&cuFunction, cuModule, kernels[idx]));
+        const char *kernel_name = kernels[idx];
+
+        checkCudaErrors(cuModuleGetFunction(&cuFunction, cuModule, kernel_name));
         checkCudaErrors(cuOccupancyMaxPotentialBlockSize(
-            &blocksPerGrid, &threadsPerBlock, cuFunction, 0, 2 * block_size * block_size * sizeof(float), 0));
+            &blocksPerGrid, // min grid size
+            &threadsPerBlock,  // block size
+            cuFunction, // func
+            0, // blockSizeToDynamicSMemSize
+            2 * block_size * block_size * sizeof(float), // dynamicSMemSize
+            0 // blockSizeLimit
+        ));
         if (block_size * block_size <= threadsPerBlock) {
-            printf("> %d block size selected\n", block_size);
+            printf("> %s kernel has been selected with %d block size selected\n", kernel_name, block_size);
             break;
         }
         else {
