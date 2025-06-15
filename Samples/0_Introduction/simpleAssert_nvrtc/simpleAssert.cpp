@@ -94,17 +94,19 @@ void runTest(int argc, char **argv)
     int   count  = 60;
     void *args[] = {(void *)&count};
 
-    checkCudaErrors(cuLaunchKernel(kernel_addr,
-                                   dimGrid.x,
-                                   dimGrid.y,
-                                   dimGrid.z, /* grid dim */
-                                   dimBlock.x,
-                                   dimBlock.y,
-                                   dimBlock.z, /* block dim */
-                                   0,
-                                   0,        /* shared mem, stream */
-                                   &args[0], /* arguments */
-                                   0));
+    checkCudaErrors(cuLaunchKernel(
+        kernel_addr,
+        dimGrid.x,
+        dimGrid.y,
+        dimGrid.z, /* grid dim */
+        dimBlock.x,
+        dimBlock.y,
+        dimBlock.z, /* block dim */
+        0,
+        0,        /* shared mem, stream */
+        &args[0], /* arguments */
+        0
+    ));
 
     // Synchronize (flushes assert output).
     printf("\n-- Begin assert output\n\n");
