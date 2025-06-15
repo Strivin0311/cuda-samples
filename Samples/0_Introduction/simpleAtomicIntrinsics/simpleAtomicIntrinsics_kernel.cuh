@@ -42,41 +42,52 @@ __global__ void testKernel(int *g_odata)
 
     // Test various atomic instructions
 
-    // Arithmetic atomic instructions
+    /* Arithmetic atomic instructions */
 
     // Atomic addition
+    // new = old + val
     atomicAdd(&g_odata[0], 10);
 
-    // Atomic subtraction (final should be 0)
+    // Atomic subtraction
+    // new = old - val
     atomicSub(&g_odata[1], 10);
 
     // Atomic exchange
+    // new = val
     atomicExch(&g_odata[2], tid);
 
     // Atomic maximum
+    // new = max(old, val)
     atomicMax(&g_odata[3], tid);
 
     // Atomic minimum
+    // new = min(old, val)
     atomicMin(&g_odata[4], tid);
 
-    // Atomic increment (modulo 17+1)
+    // Atomic increment (mod 17+1, i.e. the value is loop-incremented in range [0, 17])
+    // new = ((old >= val) ? 0 : (old+1))
     atomicInc((unsigned int *)&g_odata[5], 17);
 
-    // Atomic decrement
+    // Atomic decrement (mod 137+1, i.e. the value is loop-decremented in range [0, 137])
+    // new = (((old == 0) || (old > val)) ? val : (old-1)
     atomicDec((unsigned int *)&g_odata[6], 137);
 
     // Atomic compare-and-swap
+    // new = (old == compare ? val : old)
     atomicCAS(&g_odata[7], tid - 1, tid);
 
-    // Bitwise atomic instructions
+    /* Bitwise logical atomic instructions */
 
     // Atomic AND
+    // new = old & val
     atomicAnd(&g_odata[8], 2 * tid + 7);
 
     // Atomic OR
+    // new = old | val
     atomicOr(&g_odata[9], 1 << tid);
 
     // Atomic XOR
+    // new = old ^ val
     atomicXor(&g_odata[10], tid);
 }
 

@@ -93,6 +93,9 @@ void runTest(int argc, char **argv)
 
     unsigned int numThreads = 256;
     unsigned int numBlocks  = 64;
+    printf("Running with %d blocks, each containing %d threads\n", numBlocks, numThreads);
+    printf("Total number of threads: %d\n", numThreads * numBlocks);
+
     unsigned int numData    = 11;
     unsigned int memSize    = sizeof(int) * numData;
 
@@ -107,6 +110,12 @@ void runTest(int argc, char **argv)
     // To make the AND and XOR tests generate something other than 0...
     hOData[8] = hOData[10] = 0xff;
 
+    // print the initial data
+    printf("Initial hOData: \n");
+    for (unsigned int i = 0; i < numData; i++)
+        printf("data[%d]=%d\n", i, hOData[i]);
+    printf("\n");
+
     checkCudaErrors(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
     // allocate device memory for result
     int *dOData;
@@ -120,6 +129,12 @@ void runTest(int argc, char **argv)
     // Copy result from device to host
     checkCudaErrors(cudaMemcpyAsync(hOData, dOData, memSize, cudaMemcpyDeviceToHost, stream));
     checkCudaErrors(cudaStreamSynchronize(stream));
+
+    // print the final data
+    printf("Final hOData After AtomicOps: \n");
+    for (unsigned int i = 0; i < numData; i++)
+        printf("data[%d]=%d\n", i, hOData[i]);
+    printf("\n");
 
     sdkStopTimer(&timer);
     printf("Processing time: %f (ms)\n", sdkGetTimerValue(&timer));
