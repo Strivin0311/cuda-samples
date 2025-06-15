@@ -50,7 +50,7 @@ __device__ void reduceBlockData(cuda::barrier<cuda::thread_scope_block> &barrier
 {
     extern __shared__ double tmp[];
 
-#pragma unroll
+    #pragma unroll
     for (int offset = tile32.size() / 2; offset > 0; offset /= 2) {
         threadSum += tile32.shfl_down(threadSum, offset);
     }
@@ -66,7 +66,7 @@ __device__ void reduceBlockData(cuda::barrier<cuda::thread_scope_block> &barrier
     if (tile32.meta_group_rank() == 0) {
         double beta = tile32.thread_rank() < tile32.meta_group_size() ? tmp[tile32.thread_rank()] : 0.0;
 
-#pragma unroll
+        #pragma unroll
         for (int offset = tile32.size() / 2; offset > 0; offset /= 2) {
             beta += tile32.shfl_down(beta, offset);
         }
@@ -83,11 +83,10 @@ __device__ void reduceBlockData(cuda::barrier<cuda::thread_scope_block> &barrier
 
 __global__ void normVecByDotProductAWBarrier(float *vecA, float *vecB, double *partialResults, int size)
 {
-#if __CUDA_ARCH__ >= 700
-#pragma diag_suppress static_var_with_dynamic_init
+    #if __CUDA_ARCH__ >= 700
+    #pragma diag_suppress static_var_with_dynamic_init
     cg::thread_block cta  = cg::this_thread_block();
     cg::grid_group   grid = cg::this_grid();
-    ;
     cg::thread_block_tile<32> tile32 = cg::tiled_partition<32>(cta);
 
     __shared__ cuda::barrier<cuda::thread_scope_block> barrier;
@@ -128,7 +127,7 @@ __global__ void normVecByDotProductAWBarrier(float *vecA, float *vecB, double *p
         vecA[i] = (float)vecA[i] / finalValue;
         vecB[i] = (float)vecB[i] / finalValue;
     }
-#endif
+    #endif
 }
 
 int runNormVecByDotProductAWBarrier(int argc, char **argv, int deviceId);
@@ -195,32 +194,60 @@ int runNormVecByDotProductAWBarrier(int argc, char **argv, int deviceId)
     // Kernel configuration, where a one-dimensional
     // grid and one-dimensional blocks are configured.
     int minGridSize = 0, blockSize = 0;
-    checkCudaErrors(
-        cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, (void *)normVecByDotProductAWBarrier, 0, size));
+    checkCudaErrors(cudaOccupancyMaxPotentialBlockSize(
+        &minGridSize, 
+        &blockSize, 
+        (void *)normVecByDotProductAWBarrier, 
+        0, 
+        size
+    ));
 
     int smemSize = ((blockSize / 32) + 1) * sizeof(double);
 
     int numBlocksPerSm = 0;
     checkCudaErrors(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-        &numBlocksPerSm, normVecByDotProductAWBarrier, blockSize, smemSize));
+        &numBlocksPerSm, 
+        normVecByDotProductAWBarrier, 
+        blockSize, 
+        smemSize
+    ));
 
     int multiProcessorCount = 0;
     checkCudaErrors(cudaDeviceGetAttribute(&multiProcessorCount, cudaDevAttrMultiProcessorCount, deviceId));
 
+    printf(
+        "DeviceAttr: numBlocksPerSm = %d, SMCount = %d\n",
+        numBlocksPerSm,
+        multiProcessorCount
+    );
+
     minGridSize = multiProcessorCount * numBlocksPerSm;
     checkCudaErrors(cudaMalloc(&d_partialResults, minGridSize * sizeof(double)));
 
-    printf("Launching normVecByDotProductAWBarrier kernel with numBlocks = %d "
-           "blockSize = %d\n",
-           minGridSize,
-           blockSize);
+    printf(
+        "Launching normVecByDotProductAWBarrier kernel with: numBlocks = %d, "
+        "blockSize = %d, smemSize = %d\n",
+        minGridSize,
+        blockSize,
+        smemSize
+    );
 
     dim3 dimGrid(minGridSize, 1, 1), dimBlock(blockSize, 1, 1);
 
     void *kernelArgs[] = {(void *)&d_vecA, (void *)&d_vecB, (void *)&d_partialResults, (void *)&size};
 
+    // cudaLaunchCooperativeKernel is a cooperative kernel launch function,
+    // which can launch a kernel requiring cooperative synchronization among mutilple CTAs, 
+    // so called as cooperative group (CG),
+    // while neither cudaLaunchKernel nor <<<>>> does not support.
     checkCudaErrors(cudaLaunchCooperativeKernel(
-        (void *)normVecByDotProductAWBarrier, dimGrid, dimBlock, kernelArgs, smemSize, stream));
+        (void *)normVecByDotProductAWBarrier, 
+        dimGrid, 
+        dimBlock, 
+        kernelArgs, 
+        smemSize, 
+        stream
+    ));
 
     checkCudaErrors(cudaMemcpyAsync(vecA, d_vecA, sizeof(float) * size, cudaMemcpyDeviceToHost, stream));
     checkCudaErrors(cudaStreamSynchronize(stream));
