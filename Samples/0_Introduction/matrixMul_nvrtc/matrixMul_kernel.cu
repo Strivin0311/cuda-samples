@@ -44,13 +44,14 @@
 /**
  * Matrix multiplication (CUDA Kernel) on the device: C = A * B
  * wA is A's width and wB is B's width
+* NOTE: A and B matrices are all stored in row-major order
  */
 
 #include <cooperative_groups.h>
 
 template <int BLOCK_SIZE> __device__ void matrixMulCUDA(float *C, float *A, float *B, int wA, int wB)
 {
-    // Handle to thread block group
+    // Handle to thread block group, i.e. cooperative thread array (cta)
     cooperative_groups::thread_block cta = cooperative_groups::this_thread_block();
     // Block index
     int bx = blockIdx.x;
@@ -96,18 +97,18 @@ template <int BLOCK_SIZE> __device__ void matrixMulCUDA(float *C, float *A, floa
         As[ty][tx] = A[a + wA * ty + tx];
         Bs[ty][tx] = B[b + wB * ty + tx];
 
-        // Synchronize to make sure the matrices are loaded
+        // Synchronize this block to make sure the matrices are loaded
         cooperative_groups::sync(cta);
 
-// Multiply the two matrices together;
-// each thread computes one element
-// of the block sub-matrix
-#pragma unroll
+        // Multiply the two matrices together;
+        // each thread computes one element
+        // of the block sub-matrix
+        #pragma unroll
         for (int k = 0; k < BLOCK_SIZE; ++k) {
             Csub += As[ty][k] * Bs[k][tx];
         }
 
-        // Synchronize to make sure that the preceding
+        // Synchronize this block to make sure that the preceding
         // computation is done before loading two new
         // sub-matrices of A and B in the next iteration
         cooperative_groups::sync(cta);

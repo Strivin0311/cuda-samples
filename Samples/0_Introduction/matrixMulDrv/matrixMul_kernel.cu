@@ -94,7 +94,7 @@ __device__ void matrixMul(float *C, float *A, float *B, size_type wA, size_type 
         // Multiply the two matrices together;
         // each thread computes one element
         // of the block sub-matrix
-#pragma unroll
+        #pragma unroll
 
         for (size_type k = 0; k < block_size; ++k)
             Csub += AS(ty, k) * BS(k, tx);

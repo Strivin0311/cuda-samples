@@ -109,7 +109,9 @@ int main(int argc, char *argv[])
     //   than there are CUDA devices, in which case several CPU
     //   threads will be allocating resources and launching kernels
     //   on the same device. For example, try omp_set_num_threads(2*num_gpus);
-    // REVIEW: why the API does not work, for I always run into only a single thread ?
+    /* 
+    * REVIEW: why the API does not work, for I always run into only a single thread ?
+    */
     omp_set_num_threads(N * num_gpus); // create Nx as many CPU threads as there are CUDA devices
     
     //  Recall that all variables declared inside an "omp parallel" scope are local to each CPU thread

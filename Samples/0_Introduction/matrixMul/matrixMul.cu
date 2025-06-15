@@ -47,6 +47,7 @@
 // CUDA runtime
 #include <cuda_profiler_api.h>
 #include <cuda_runtime.h>
+#include <cooperative_groups.h>
 #include "nvtx3/nvToolsExt.h"
 
 // Helper functions and utilities to work with CUDA
@@ -56,38 +57,41 @@
 /**
  * Matrix multiplication (CUDA Kernel) on the device: C = A * B
  * wA is A's width and wB is B's width
+ * NOTE: A and B matrices are all stored in row-major order
  */
 template <int BLOCK_SIZE> __global__ void MatrixMulCUDA(float *C, float *A, float *B, int wA, int wB)
 {
+    // get the handle to this thread block group, i.e. cooperative thread array (cta)
+    cooperative_groups::thread_block cta = cooperative_groups::this_thread_block();
     // Block index
-    int bx = blockIdx.x;
-    int by = blockIdx.y;
+    int bx = blockIdx.x; // iterate the block of cols of B
+    int by = blockIdx.y; // iterate the block of rows of A
 
     // Thread index
-    int tx = threadIdx.x;
-    int ty = threadIdx.y;
+    int tx = threadIdx.x; // iterate the single col of B in each block
+    int ty = threadIdx.y; // iterate the single row of A in each block
 
     // Index of the first sub-matrix of A processed by the block
-    int aBegin = wA * BLOCK_SIZE * by;
+    int aBegin = wA * BLOCK_SIZE * by; // the index of the starting row of A in the block
 
     // Index of the last sub-matrix of A processed by the block
     int aEnd = aBegin + wA - 1;
 
     // Step size used to iterate through the sub-matrices of A
-    int aStep = BLOCK_SIZE;
+    int aStep = BLOCK_SIZE; // step over a block of cols in A
 
     // Index of the first sub-matrix of B processed by the block
-    int bBegin = BLOCK_SIZE * bx;
+    int bBegin = BLOCK_SIZE * bx; // the index of the starting col of B in the block
 
     // Step size used to iterate through the sub-matrices of B
-    int bStep = BLOCK_SIZE * wB;
+    int bStep = BLOCK_SIZE * wB; // step over a block of rows in B
 
     // Csub is used to store the element of the block sub-matrix
     // that is computed by the thread
     float Csub = 0;
 
     // Loop over all the sub-matrices of A and B
-    // required to compute the block sub-matrix
+    // required to compute the block sub-matrix of C
     for (int a = aBegin, b = bBegin; a <= aEnd; a += aStep, b += bStep) {
         // Declaration of the shared memory array As used to
         // store the sub-matrix of A
@@ -97,33 +101,31 @@ template <int BLOCK_SIZE> __global__ void MatrixMulCUDA(float *C, float *A, floa
         // store the sub-matrix of B
         __shared__ float Bs[BLOCK_SIZE][BLOCK_SIZE];
 
-        // Load the matrices from device memory
-        // to shared memory; each thread loads
-        // one element of each matrix
+        // Load the matrices from device memory to shared memory
+        // each thread loads one element of each matrix
         As[ty][tx] = A[a + wA * ty + tx];
         Bs[ty][tx] = B[b + wB * ty + tx];
 
-        // Synchronize to make sure the matrices are loaded
-        __syncthreads();
+        // Synchronize this block to make sure the matrices are loaded
+        cooperative_groups::sync(cta); // i.e. __syncthreads();
 
-        // Multiply the two matrices together;
-        // each thread computes one element
-        // of the block sub-matrix
-#pragma unroll
+        // Multiply the two matrices together
+        // each thread computes one element of the block sub-matrix of C
+        #pragma unroll
 
         for (int k = 0; k < BLOCK_SIZE; ++k) {
             Csub += As[ty][k] * Bs[k][tx];
         }
 
-        // Synchronize to make sure that the preceding
+        // Synchronize this block to make sure that the preceding
         // computation is done before loading two new
         // sub-matrices of A and B in the next iteration
-        __syncthreads();
+        cooperative_groups::sync(cta); // i.e. __syncthreads();
     }
 
-    // Write the block sub-matrix to device memory;
+    // Write the block sub-matrix of C in shape [hA, wB] to device memory
     // each thread writes one element
-    int c               = wB * BLOCK_SIZE * by + BLOCK_SIZE * bx;
+    int c               = wB * BLOCK_SIZE * by + BLOCK_SIZE * bx; // the index of the starting left-top of C in the block
     C[c + wB * ty + tx] = Csub;
 }
 
@@ -209,7 +211,6 @@ int MatrixMultiply(int argc, char **argv, int block_size, const dim3 &dimsA, con
 
     for (int j = 0; j < nIter; j++) {
         std::string message = "iter " + std::to_string(j);
-        
         nvtxRangePushA(message.c_str());
         if (block_size == 16) {
             nvtxRangePushA("MatrixMul-16");
@@ -238,9 +239,11 @@ int MatrixMultiply(int argc, char **argv, int block_size, const dim3 &dimsA, con
     double flopsPerMatrixMul =
         2.0 * static_cast<double>(dimsA.x) * static_cast<double>(dimsA.y) * static_cast<double>(dimsB.x);
     double teraFlops = (flopsPerMatrixMul * 1.0e-12f) / (msecPerMatrixMul / 1000.0f);
-    printf("Performance= %.2f TFlop/s, Time= %.3f msec, Size= %.0f Ops,"
+    double MFU = teraFlops / 67.0 * 100.0; // H800 has a peak throughput of 67 TFlops
+    printf("Performance= %.2f TFlop/s, MFU=%.2f %%, Time= %.3f msec, Size= %.0f Ops,"
            " WorkgroupSize= %u threads/block\n",
            teraFlops,
+           MFU,
            msecPerMatrixMul,
            flopsPerMatrixMul,
            threads.x * threads.y);

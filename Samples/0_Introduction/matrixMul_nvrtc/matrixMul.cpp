@@ -122,24 +122,25 @@ int matrixMultiply(int argc, char **argv, int block_size, dim3 &dimsA, dim3 &dim
         checkCudaErrors(cuModuleGetFunction(&kernel_addr, module, "matrixMulCUDA_block32"));
     }
 
-    void *arr[] = {(void *)&d_C, (void *)&d_A, (void *)&d_B, (void *)&dimsA.x, (void *)&dimsB.x};
+    void *args[] = {(void *)&d_C, (void *)&d_A, (void *)&d_B, (void *)&dimsA.x, (void *)&dimsB.x};
 
     // Execute the kernel
     int nIter = 300;
 
     for (int j = 0; j < nIter; j++) {
-        checkCudaErrors(cuLaunchKernel(kernel_addr,
-                                       grid.x,
-                                       grid.y,
-                                       grid.z, /* grid dim */
-                                       threads.x,
-                                       threads.y,
-                                       threads.z, /* block dim */
-                                       0,
-                                       0,       /* shared mem, stream */
-                                       &arr[0], /* arguments */
-                                       0));
-
+        checkCudaErrors(cuLaunchKernel(
+            kernel_addr,
+            grid.x,
+            grid.y,
+            grid.z, /* grid dim */
+            threads.x,
+            threads.y,
+            threads.z, /* block dim */
+            0,       /* shared mem */
+            0,       /* stream */
+            &args[0], /* arguments */
+            0
+        ));
         checkCudaErrors(cuCtxSynchronize());
     }
 
