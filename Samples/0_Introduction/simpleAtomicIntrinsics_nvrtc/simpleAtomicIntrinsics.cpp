@@ -100,6 +100,9 @@ void runTest(int argc, char **argv)
 
     unsigned int numThreads = 256;
     unsigned int numBlocks  = 64;
+    printf("Running with %d blocks, each containing %d threads\n", numBlocks, numThreads);
+    printf("Total number of threads: %d\n", numThreads * numBlocks);
+
     unsigned int numData    = 11;
     unsigned int memSize    = sizeof(int) * numData;
 
@@ -113,6 +116,12 @@ void runTest(int argc, char **argv)
     // To make the AND and XOR tests generate something other than 0...
     hOData[8] = hOData[10] = 0xff;
 
+    // print the initial data
+    printf("Initial hOData: \n");
+    for (unsigned int i = 0; i < numData; i++)
+        printf("data[%d]=%d\n", i, hOData[i]);
+    printf("\n");
+
     // allocate device memory for result
     CUdeviceptr dOData;
     checkCudaErrors(cuMemAlloc(&dOData, memSize));
@@ -123,21 +132,29 @@ void runTest(int argc, char **argv)
     dim3 cudaGridSize(numBlocks, 1, 1);
 
     void *arr[] = {(void *)&dOData};
-    checkCudaErrors(cuLaunchKernel(kernel_addr,
-                                   cudaGridSize.x,
-                                   cudaGridSize.y,
-                                   cudaGridSize.z, /* grid dim */
-                                   cudaBlockSize.x,
-                                   cudaBlockSize.y,
-                                   cudaBlockSize.z, /* block dim */
-                                   0,
-                                   0,       /* shared mem, stream */
-                                   &arr[0], /* arguments */
-                                   0));
+    checkCudaErrors(cuLaunchKernel(
+        kernel_addr,
+        cudaGridSize.x,
+        cudaGridSize.y,
+        cudaGridSize.z, /* grid dim */
+        cudaBlockSize.x,
+        cudaBlockSize.y,
+        cudaBlockSize.z, /* block dim */
+        0,
+        0,       /* shared mem, stream */
+        &arr[0], /* arguments */
+        0
+    ));
 
     checkCudaErrors(cuCtxSynchronize());
 
     checkCudaErrors(cuMemcpyDtoH(hOData, dOData, memSize));
+
+    // print the final data
+    printf("Final hOData After AtomicOps: \n");
+    for (unsigned int i = 0; i < numData; i++)
+        printf("data[%d]=%d\n", i, hOData[i]);
+    printf("\n");
 
     // Copy result from device to host
     sdkStopTimer(&timer);
