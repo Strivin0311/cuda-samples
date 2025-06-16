@@ -98,7 +98,6 @@ int main(int argc, char **argv)
 
     printf("Inspecting the results...\n");
     uint keysFlag = validateSortedKeys(h_DstKey, h_SrcKey, 1, N, numValues, DIR);
-
     uint valuesFlag = validateSortedValues(h_DstKey, h_DstVal, h_SrcKey, 1, N);
 
     printf("Shutting down...\n");
