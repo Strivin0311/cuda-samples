@@ -160,6 +160,7 @@ int main(int argc, char **argv)
     // Allocate and initialize an array of stream handles
     cudaStream_t *streams = (cudaStream_t *)malloc(nstreams * sizeof(cudaStream_t));
 
+    // Create CUDA streams that will implicitly synchronize with the default stream
     for (int i = 0; i < nstreams; i++) {
         checkCudaErrors(cudaStreamCreate(&(streams[i])));
     }
@@ -191,12 +192,15 @@ int main(int argc, char **argv)
         total_clocks += time_clocks;
     }
 
-    // Stop the clock in stream 0 (i.e. all previous kernels will be complete)
+    // Stop the clock in stream 0
+    // since all streams are not non-blocking streams, 
+    // all previous kernels executed on all other streams will be completed
+    // before this event is recorded
     checkCudaErrors(cudaEventRecord(stop_event, 0));
 
     // At this point the CPU has dispatched all work for the GPU and can
     // continue processing other tasks in parallel. In this sample we just want
-    // to wait until all work is done so we use a blocking cudaMemcpy below.
+    // to wait until all work is done so we use a CPU-blocking cudaMemcpy below.
 
     // Run the sum kernel and copy the result back to host
     sum<<<1, 32>>>(d_a, 2 * nstreams);
