@@ -42,10 +42,11 @@
 namespace cg = cooperative_groups;
 
 #if __CUDA_ARCH__ >= 700
-__device__ void warp_all_reduce(cg::thread_block_tile<32> &tile32, double &warpSum) {
+__device__ void warp_sum_reduce(cg::thread_block_tile<32> &tile32, double &warpSum) {
     // tile32.size(): the number of threads in the warp
     // tile32.thread_rank(): the thread id in the warp, i.e. the lane id
     #pragma unroll
+    // since using `shufl_down`, the final reduced sum will be stored in lane 0
     for (int offset = tile32.size() / 2; offset > 0; offset /= 2) {
         warpSum += tile32.shfl_down(warpSum, offset);
     }
@@ -65,7 +66,7 @@ __device__ void reduceBlockData(cuda::barrier<cuda::thread_scope_block> &barrier
     // which is dynamically determined at runtime
     extern __shared__ double tmp[];
 
-    warp_all_reduce(tile32, threadSum);
+    warp_sum_reduce(tile32, threadSum);
 
     // tile32.meta_group_rank(): the warp id in the block
     if (tile32.thread_rank() == 0) {
@@ -84,7 +85,7 @@ __device__ void reduceBlockData(cuda::barrier<cuda::thread_scope_block> &barrier
     if (tile32.meta_group_rank() == 0) {
         double beta = tile32.thread_rank() < tile32.meta_group_size() ? tmp[tile32.thread_rank()] : 0.0;
         
-        warp_all_reduce(tile32, beta);
+        warp_sum_reduce(tile32, beta);
 
         if (tile32.thread_rank() == 0) {
             if (writeSquareRoot)

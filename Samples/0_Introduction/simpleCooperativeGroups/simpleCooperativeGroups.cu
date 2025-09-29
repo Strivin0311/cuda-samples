@@ -120,10 +120,10 @@ __global__ void cgkernel()
     threadBlockGroup.sync();
 
     // each tiledPartition16 group includes 16 threads
+    // usually when the size is 32, it equals to a warp
     thread_block_tile<16> tiledPartition16 = tiled_partition<16>(threadBlockGroup);
 
-    // This offset allows each group to have its own unique area in the workspace
-    // array
+    // This offset allows each group to have its own unique area in the workspace array
     int workspaceOffset = threadBlockGroup.thread_rank() - tiledPartition16.thread_rank();
 
     // input to reduction, for each thread, is its' rank in the group
