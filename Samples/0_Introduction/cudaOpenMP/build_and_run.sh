@@ -39,7 +39,7 @@ if [ "$SKIP_BUILD" = false ]; then
 
     rm -rf $BUILD_ROOT && mkdir -p $BUILD_ROOT && cd $BUILD_ROOT || exit
 
-    cmake ..
+    cmake -DCMAKE_CUDA_ARCHITECTURES="75;80;86;89;90;100" ..
     make -j8 || exit
 
     cd ..

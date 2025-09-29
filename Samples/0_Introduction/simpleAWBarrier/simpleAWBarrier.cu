@@ -42,34 +42,49 @@
 namespace cg = cooperative_groups;
 
 #if __CUDA_ARCH__ >= 700
+__device__ void warp_all_reduce(cg::thread_block_tile<32> &tile32, double &warpSum) {
+    // tile32.size(): the number of threads in the warp
+    // tile32.thread_rank(): the thread id in the warp, i.e. the lane id
+    #pragma unroll
+    for (int offset = tile32.size() / 2; offset > 0; offset /= 2) {
+        warpSum += tile32.shfl_down(warpSum, offset);
+    }
+}
+#endif
+
+
+#if __CUDA_ARCH__ >= 700
 template <bool writeSquareRoot>
 __device__ void reduceBlockData(cuda::barrier<cuda::thread_scope_block> &barrier,
                                 cg::thread_block_tile<32>               &tile32,
                                 double                                  &threadSum,
                                 double                                  *result)
 {
+    // `extern __shared__` is required since the size of the tmp array
+    // equals to the number of warps in the block,
+    // which is dynamically determined at runtime
     extern __shared__ double tmp[];
 
-    #pragma unroll
-    for (int offset = tile32.size() / 2; offset > 0; offset /= 2) {
-        threadSum += tile32.shfl_down(threadSum, offset);
-    }
+    warp_all_reduce(tile32, threadSum);
+
+    // tile32.meta_group_rank(): the warp id in the block
     if (tile32.thread_rank() == 0) {
         tmp[tile32.meta_group_rank()] = threadSum;
     }
 
+    // barrier.arrive(): mark the current thread as arrived
+    // with a token returned as a mark key
     auto token = barrier.arrive();
 
+    // barrier.wait(token): wait for the expected number of threads to arrive
+    // passing in the token for each arrived thread
     barrier.wait(std::move(token));
 
     // The warp 0 will perform last round of reduction
     if (tile32.meta_group_rank() == 0) {
         double beta = tile32.thread_rank() < tile32.meta_group_size() ? tmp[tile32.thread_rank()] : 0.0;
-
-        #pragma unroll
-        for (int offset = tile32.size() / 2; offset > 0; offset /= 2) {
-            beta += tile32.shfl_down(beta, offset);
-        }
+        
+        warp_all_reduce(tile32, beta);
 
         if (tile32.thread_rank() == 0) {
             if (writeSquareRoot)
@@ -85,40 +100,43 @@ __global__ void normVecByDotProductAWBarrier(float *vecA, float *vecB, double *p
 {
     #if __CUDA_ARCH__ >= 700
     #pragma diag_suppress static_var_with_dynamic_init
-    cg::thread_block cta  = cg::this_thread_block();
-    cg::grid_group   grid = cg::this_grid();
-    cg::thread_block_tile<32> tile32 = cg::tiled_partition<32>(cta);
+    cg::thread_block cta  = cg::this_thread_block(); // this block (SM)
+    cg::grid_group   grid = cg::this_grid(); // this grid
+    cg::thread_block_tile<32> tile32 = cg::tiled_partition<32>(cta); // this warp
 
-    __shared__ cuda::barrier<cuda::thread_scope_block> barrier;
+    __shared__ cuda::barrier<cuda::thread_scope_block> barrier; // thread-granularity barrier
 
     if (threadIdx.x == 0) {
-        init(&barrier, blockDim.x);
+        init(&barrier, blockDim.x); // barrier across a block of threads
     }
 
-    cg::sync(cta);
+    cg::sync(cta); // equals to `__syncthreads()`
 
     double threadSum = 0.0;
+    // grid.thread_rank(): the thread id in the whole grid
+    // grid.size(): the number of threads in the whole grid
     for (int i = grid.thread_rank(); i < size; i += grid.size()) {
         threadSum += (double)(vecA[i] * vecB[i]);
     }
 
-    // Each thread block performs reduction of partial dotProducts and writes to
-    // global mem.
+    // Each thread block performs reduction of partial dotProducts and writes to global mem.
     reduceBlockData<false>(barrier, tile32, threadSum, &partialResults[blockIdx.x]);
 
-    cg::sync(grid);
+    cg::sync(grid); // equals to `cg::this_grid().sync()`
 
     // One block performs the final summation of partial dot products
     // of all the thread blocks and writes the sqrt of final dot product.
     if (blockIdx.x == 0) {
         threadSum = 0.0;
+        // cta.thread_rank(): the thread id in the block
+        // cta.size(): the number of threads in the block
         for (int i = cta.thread_rank(); i < gridDim.x; i += cta.size()) {
             threadSum += partialResults[i];
         }
         reduceBlockData<true>(barrier, tile32, threadSum, &partialResults[0]);
     }
 
-    cg::sync(grid);
+    cg::sync(grid); // equals to `cg::this_grid().sync()`
 
     const double finalValue = partialResults[0];
 
