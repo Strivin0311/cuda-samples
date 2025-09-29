@@ -76,14 +76,14 @@ static void barrierWait(volatile int *barrier, volatile int *sense, unsigned int
     count = cpu_atomic_add32(barrier, 1);
     if (count == n) // Last one in
         *sense = 1;
-    while (!*sense)
+    while (!*sense) // the previous processes get sense=0, thus wait
         ;
 
     // Check-out
     count = cpu_atomic_add32(barrier, -1);
     if (count == 0) // Last one out
         *sense = 0;
-    while (*sense)
+    while (*sense) // the previous processes get sense=1, thus wait
         ;
 }
 
@@ -134,8 +134,8 @@ static void childProcess(int id)
         void       *ptr = NULL;
         cudaEvent_t event;
 
-        // Notice, we don't need to explicitly enable peer access for
-        // allocations on other devices.
+        // Notice, we don't need to explicitly enable peer access for allocations on other devices.
+        // Open the memory ptr and event from the corr. handles for each device
         checkCudaErrors(
             cudaIpcOpenMemHandle(&ptr, *(cudaIpcMemHandle_t *)&shm->memHandle[i], cudaIpcMemLazyEnablePeerAccess));
         checkCudaErrors(cudaIpcOpenEventHandle(&event, *(cudaIpcEventHandle_t *)&shm->eventHandle[i]));
@@ -161,8 +161,7 @@ static void childProcess(int id)
         checkCudaErrors(cudaEventRecord(events[bufferId], stream));
         // Wait for all my sibling processes to push this stage of their work
         // before proceeding to the next. This prevents siblings from racing
-        // ahead and clobbering the recorded event or waiting on the wrong
-        // recorded event.
+        // ahead and clobbering the recorded event or waiting on the wrong recorded event.
         barrierWait(&shm->barrier, &shm->sense, (unsigned int)procCount);
         if (id == 0) {
             printf("Step %lld done\n", (unsigned long long)i);
@@ -224,6 +223,7 @@ static void parentProcess(char *app)
 
     checkCudaErrors(cudaGetDeviceCount(&devCount));
 
+    // Use CPU shared memory to share information between processes
     if (sharedMemoryCreate(lshmName, sizeof(*shm), &info) != 0) {
         printf("Failed to create shared memory slab\n");
         exit(EXIT_FAILURE);
@@ -297,8 +297,10 @@ static void parentProcess(char *app)
 
         checkCudaErrors(cudaSetDevice(shm->devices[i]));
         checkCudaErrors(cudaMalloc(&ptr, DATA_SIZE));
+        // Get the IPC handle for each memory on each device
         checkCudaErrors(cudaIpcGetMemHandle((cudaIpcMemHandle_t *)&shm->memHandle[i], ptr));
         checkCudaErrors(cudaEventCreate(&event, cudaEventDisableTiming | cudaEventInterprocess));
+        // Get the IPC handle for each event on each device
         checkCudaErrors(cudaIpcGetEventHandle((cudaIpcEventHandle_t *)&shm->eventHandle[i], event));
 
         ptrs.push_back(ptr);
