@@ -156,6 +156,10 @@ static void childProcess(int id)
         checkCudaErrors(cudaStreamWaitEvent(stream, events[bufferId], 0));
         // Push a simple kernel on it
         simpleKernel<<<blocks, threads, 0, stream>>>((char *)ptrs[bufferId], DATA_SIZE, id);
+        // CPU check the error info once the simpleKernel returns the error code (e.g. the launch error)
+        // and then it will reset the error info to cudaSuccess
+        // so if you do not call this function right after the kernel
+        // the error info might be reset to cudaSuccess by the next kernel
         checkCudaErrors(cudaGetLastError());
         // Signal that this buffer is ready for the next consumer
         checkCudaErrors(cudaEventRecord(events[bufferId], stream));
