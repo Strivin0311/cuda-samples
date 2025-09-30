@@ -192,6 +192,8 @@ int main(int argc, char *argv[])
     incKernel<<<grid, block>>>(d_data_out[0], d_data_in[0], N, inner_reps);
 
     // Time copies and kernel
+
+    // H2D
     cudaEventRecord(start, 0);
     checkCudaErrors(cudaMemcpyAsync(d_data_in[0], h_data_in[0], memsize, cudaMemcpyHostToDevice, 0));
     cudaEventRecord(stop, 0);
@@ -200,6 +202,7 @@ int main(int argc, char *argv[])
     float memcpy_h2d_time;
     cudaEventElapsedTime(&memcpy_h2d_time, start, stop);
 
+    // D2H
     cudaEventRecord(start, 0);
     checkCudaErrors(cudaMemcpyAsync(h_data_out[0], d_data_out[0], memsize, cudaMemcpyDeviceToHost, 0));
     cudaEventRecord(stop, 0);
@@ -208,6 +211,7 @@ int main(int argc, char *argv[])
     float memcpy_d2h_time;
     cudaEventElapsedTime(&memcpy_d2h_time, start, stop);
 
+    // Compute kernel
     cudaEventRecord(start, 0);
     incKernel<<<grid, block, 0, 0>>>(d_data_out[0], d_data_in[0], N, inner_reps);
     cudaEventRecord(stop, 0);
@@ -222,13 +226,11 @@ int main(int argc, char *argv[])
     checkCudaErrors(cudaDeviceGetAttribute(&canOverlap, cudaDevAttrGpuOverlap, cuda_device));
     printf("(%s) Can overlap one CPU<>GPU data transfer with GPU kernel execution "
            "(device property \"cudaDevAttrGpuOverlap\")\n",
-           canOverlap ? "X" : " ");
-    // printf("(%s) Can execute several GPU kernels simultaneously (compute
-    // capability >= 2.0)\n", deviceProp.major >= 2 ? "X": " ");
+           canOverlap ? "Yes" : "No");
     printf("(%s) Can overlap two CPU<>GPU data transfers with GPU kernel execution\n"
            "    (Compute Capability >= 2.0 AND (Tesla product OR Quadro "
            "4000/5000/6000/K5000)\n",
-           (deviceProp.major >= 2 && deviceProp.asyncEngineCount > 1) ? "X" : " ");
+           (deviceProp.major >= 2 && deviceProp.asyncEngineCount > 1) ? "Yes" : "No");
 
     printf("\n");
     printf("Measured timings (throughput):\n");
