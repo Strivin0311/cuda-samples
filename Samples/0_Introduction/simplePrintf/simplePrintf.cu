@@ -42,10 +42,9 @@
 
 __global__ void testKernel(int val)
 {
-    printf("[%d, %d]:\t\tValue is:%d\n",
-           blockIdx.y * gridDim.x + blockIdx.x,
-           threadIdx.z * blockDim.x * blockDim.y + threadIdx.y * blockDim.x + threadIdx.x,
-           val);
+    int bid = blockIdx.z * gridDim.y * gridDim.x + blockIdx.y * gridDim.x + blockIdx.x;
+    int tid = threadIdx.z * blockDim.x * blockDim.y + threadIdx.y * blockDim.x + threadIdx.x;
+    printf("[BID(%d), TID(%d)]: Value is:%d\n", bid, tid, val);
 }
 
 int main(int argc, char **argv)
@@ -63,9 +62,9 @@ int main(int argc, char **argv)
 
     printf("printf() is called. Output:\n\n");
 
-    // Kernel configuration, where a two-dimensional grid and
-    // three-dimensional blocks are configured.
-    dim3 dimGrid(2, 2);
+    // Kernel configuration, where:
+    // a three-dimensional grid and three-dimensional blocks are configured.
+    dim3 dimGrid(2, 2, 1);
     dim3 dimBlock(2, 2, 2);
     testKernel<<<dimGrid, dimBlock>>>(10);
     cudaDeviceSynchronize();
