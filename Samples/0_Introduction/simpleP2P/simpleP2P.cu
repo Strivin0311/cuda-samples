@@ -124,7 +124,7 @@ int main(int argc, char **argv)
     gpuid[0] = p2pCapableGPUs[0];
     gpuid[1] = p2pCapableGPUs[1];
 
-    // Enable peer access
+    // Enable peer access (by default it is disabled and will raise `cudaErrorIllegalAddress` error)
     printf("Enabling peer access between GPU%d and GPU%d...\n", gpuid[0], gpuid[1]);
     checkCudaErrors(cudaSetDevice(gpuid[0]));
     checkCudaErrors(cudaDeviceEnablePeerAccess(gpuid[1], 0));
@@ -148,6 +148,10 @@ int main(int argc, char **argv)
     printf("Creating event handles...\n");
     cudaEvent_t start_event, stop_event;
     float       time_memcpy;
+    // The default flag `cudaEventDefault` will let host thread busy-wait for the event to complete
+    // which takes the CPU resources the whole time, better for short-term synchronization
+    // and the flag `cudaEventBlockingSync` will let the host thread sleep until the event completes
+    // which gives up the CPU resources to other threads, better for long-term synchronization
     int         eventflags = cudaEventBlockingSync;
     checkCudaErrors(cudaEventCreateWithFlags(&start_event, eventflags));
     checkCudaErrors(cudaEventCreateWithFlags(&stop_event, eventflags));
