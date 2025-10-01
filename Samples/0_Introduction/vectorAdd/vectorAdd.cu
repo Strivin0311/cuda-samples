@@ -41,8 +41,8 @@
 /**
  * CUDA Kernel Device code
  *
- * Computes the vector addition of A and B into C. The 3 vectors have the same
- * number of elements numElements.
+ * Computes the vector addition of A and B into C. 
+ * The 3 vectors have the same number of elements numElements.
  */
 __global__ void vectorAdd(const float *A, const float *B, float *C, int numElements)
 {
@@ -114,9 +114,8 @@ int main(void)
         exit(EXIT_FAILURE);
     }
 
-    // Copy the host input vectors A and B in host memory to the device input
-    // vectors in
-    // device memory
+    // Copy the host input vectors A and B in host memory 
+    // to the device input vectors in device memory
     printf("Copy input data from the host memory to the CUDA device\n");
     err = cudaMemcpy(d_A, h_A, size, cudaMemcpyHostToDevice);
 
@@ -144,8 +143,8 @@ int main(void)
         exit(EXIT_FAILURE);
     }
 
-    // Copy the device result vector in device memory to the host result vector
-    // in host memory.
+    // Copy the device result vector in device memory 
+    // to the host result vector in host memory.
     printf("Copy output data from the CUDA device to the host memory\n");
     err = cudaMemcpy(h_C, d_C, size, cudaMemcpyDeviceToHost);
 
