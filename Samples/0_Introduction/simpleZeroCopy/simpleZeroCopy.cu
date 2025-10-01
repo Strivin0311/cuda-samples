@@ -176,6 +176,8 @@ int main(int argc, char **argv)
     }
     else {
 #if CUDART_VERSION >= 2020
+        // Maps the allocation into the CUDA address space. 
+        // The device pointer to the memory may be obtained by calling ::cudaHostGetDevicePointer()
         flags = cudaHostAllocMapped;
         checkCudaErrors(cudaHostAlloc((void **)&a, bytes, flags));
         checkCudaErrors(cudaHostAlloc((void **)&b, bytes, flags));
