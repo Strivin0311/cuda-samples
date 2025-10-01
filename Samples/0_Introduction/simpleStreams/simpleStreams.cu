@@ -120,7 +120,7 @@ inline void AllocateHostMemory(bool bPinGenericMemory, int **pp_a, int **ppAlign
         printf("> cudaHostRegister() registering %4.2f Mbytes of generic allocated "
                "system memory\n",
                (float)nbytes / 1048576.0f);
-        // pin allocate memory
+        // register allocated host memory to page-locked
         checkCudaErrors(cudaHostRegister(*ppAligned_a, nbytes, cudaHostRegisterMapped));
     }
     else
@@ -195,7 +195,6 @@ int main(int argc, char **argv)
     float scale_factor = 1.0f;
 
     // allocate generic memory and pin it laster instead of using cudaHostAlloc()
-
     bool bPinGenericMemory  = DEFAULT_PINNED_GENERIC_MEMORY; // we want this to be the default behavior
     int  device_sync_method = cudaDeviceBlockingSync;        // by default we use BlockingSync
 
@@ -282,7 +281,7 @@ int main(int argc, char **argv)
     n = (int)rint((float)n / scale_factor);
 
     printf("> CUDA Capable: SM %d.%d hardware\n", deviceProp.major, deviceProp.minor);
-    printf("> %d Multiprocessor(s) x %d (Cores/Multiprocessor) = %d (Cores)\n",
+    printf("> %d Multiprocessor(s) x %d (Cuda Cores/Multiprocessor) = %d (Cores)\n",
            deviceProp.multiProcessorCount,
            _ConvertSMVer2Cores(deviceProp.major, deviceProp.minor),
            _ConvertSMVer2Cores(deviceProp.major, deviceProp.minor) * deviceProp.multiProcessorCount);
@@ -376,16 +375,13 @@ int main(int argc, char **argv)
     checkCudaErrors(cudaEventRecord(start_event, 0));
 
     for (int k = 0; k < nreps; k++) {
-        // asynchronously launch nstreams kernels, each operating on its own portion
-        // of data
+        // asynchronously launch nstreams kernels, each operating on its own portion of data
         for (int i = 0; i < nstreams; i++) {
             init_array<<<blocks, threads, 0, streams[i]>>>(d_a + i * n / nstreams, d_c, niterations);
         }
 
         // asynchronously launch nstreams memcopies.  Note that memcopy in stream x
-        // will only
-        //   commence executing when all previous CUDA calls in stream x have
-        //   completed
+        // will only commence executing when all previous CUDA calls in stream x have completed
         for (int i = 0; i < nstreams; i++) {
             checkCudaErrors(cudaMemcpyAsync(hAligned_a + i * n / nstreams,
                                             d_a + i * n / nstreams,

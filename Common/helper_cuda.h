@@ -649,7 +649,7 @@ inline int _ConvertSMVer2Cores(int major, int minor) {
   typedef struct {
     int SM;  // 0xMm (hexidecimal notation), M = SM Major version,
     // and m = SM minor version
-    int Cores;
+    int Cores; // Number of Cuda Cores
   } sSMtoCores;
 
   sSMtoCores nGpuArchCoresPerSM[] = {
