@@ -46,36 +46,56 @@ __global__ void atomicKernel(int *atom_arr)
     unsigned int tid = blockDim.x * blockIdx.x + threadIdx.x;
 
     for (int i = 0; i < LOOP_NUM; i++) {
-        // Atomic addition
+        // Atomic addition:
+        // atom_arr[0] += 10
+        // and return the old value before adding
         atomicAdd_system(&atom_arr[0], 10);
 
         // Atomic exchange
+        // atom_arr[1] = tid
+        // and return the old value before exchanging
         atomicExch_system(&atom_arr[1], tid);
 
         // Atomic maximum
+        // atom_arr[2] = max(atom_arr[2], tid)
+        // and return the old value before maximizing
         atomicMax_system(&atom_arr[2], tid);
 
         // Atomic minimum
+        // atom_arr[3] = min(atom_arr[3], tid)
+        // and return the old value before minimizing
         atomicMin_system(&atom_arr[3], tid);
 
-        // Atomic increment (modulo 17+1)
+        // Atomic increment (modulo 17+1, i.e. [0, 17])
+        // atom_arr[4] = atom_arr[4] >= 17 ? 0 : atom_arr[4] + 1
+        // and return the old value before incrementing
         atomicInc_system((unsigned int *)&atom_arr[4], 17);
 
-        // Atomic decrement
+        // Atomic decrement (modulo 137+1, i.e. [0, 137])
+        // atom_arr[5] = ((atom_arr[5] == 0) || (atom_arr[5] > 137)) ? 137 : atom_arr[5] - 1
+        // and return the old value before decrementing
         atomicDec_system((unsigned int *)&atom_arr[5], 137);
 
         // Atomic compare-and-swap
+        // atom_arr[6] = atom_arr[6] == tid - 1 ? tid : atom_arr[6]
+        // and return the old value before swapping
         atomicCAS_system(&atom_arr[6], tid - 1, tid);
 
         // Bitwise atomic instructions
 
         // Atomic AND
+        // atom_arr[7] = atom_arr[7] & (2 * tid + 7)
+        // and return the old value before masking
         atomicAnd_system(&atom_arr[7], 2 * tid + 7);
 
         // Atomic OR
+        // atom_arr[8] = atom_arr[8] | (1 << tid)
+        // and return the old value before masking
         atomicOr_system(&atom_arr[8], 1 << tid);
 
         // Atomic XOR
+        // atom_arr[9] = atom_arr[9] ^ tid
+        // and return the old value before masking
         atomicXor_system(&atom_arr[9], tid);
     }
 }
@@ -85,12 +105,18 @@ void atomicKernel_CPU(int *atom_arr, int no_of_threads)
     for (int i = no_of_threads; i < 2 * no_of_threads; i++) {
         for (int j = 0; j < LOOP_NUM; j++) {
             // Atomic addition
+            // atom_arr[0] += 10
+            // and return the old value before adding
             __sync_fetch_and_add(&atom_arr[0], 10);
 
             // Atomic exchange
+            // atom_arr[1] = i
+            // and return the old value before exchanging
             __sync_lock_test_and_set(&atom_arr[1], i);
 
-            // Atomic maximum
+            // Atomic maximum, implemented by CAS
+            // atom_arr[2] = max(atom_arr[2], i) = atom_arr[2] == expected ? max(expected, i) : atom_arr[2]
+            // and return the old value before maximizing
             int old, expected;
             do {
                 expected = atom_arr[2];
@@ -98,19 +124,27 @@ void atomicKernel_CPU(int *atom_arr, int no_of_threads)
             } while (old != expected);
 
             // Atomic minimum
+            // atom_arr[3] = min(atom_arr[3], i) = atom_arr[3] == expected ? min(expected, i) : atom_arr[3]
+            // and return the old value before minimizing
             do {
                 expected = atom_arr[3];
                 old      = __sync_val_compare_and_swap(&atom_arr[3], expected, min(expected, i));
             } while (old != expected);
 
-            // Atomic increment (modulo 17+1)
+            // Atomic increment (modulo 17+1, i.e. [0, 17])
+            // atom_arr[4] = atom_arr[4] >= 17 ? 0 : atom_arr[4] + 1
+            // atom_arr[4] = atom_arr[4] == expected ? (expected >= 17 ? 0 : expected + 1) : atom_arr[4]
+            // and return the old value before incrementing
             int limit = 17;
             do {
                 expected = atom_arr[4];
                 old      = __sync_val_compare_and_swap(&atom_arr[4], expected, (expected >= limit) ? 0 : expected + 1);
             } while (old != expected);
 
-            // Atomic decrement
+            // Atomic decrement (modulo 137+1, i.e. [0, 137])
+            // atom_arr[5] = ((atom_arr[5] == 0) || (atom_arr[5] > 137)) ? 137 : atom_arr[5] - 1
+            // atom_arr[5] = atom_arr[5] == expected ? (((expected == 0) || (expected > limit)) ? limit : expected - 1) : atom_arr[5]
+            // and return the old value before decrementing
             limit = 137;
             do {
                 expected = atom_arr[5];
@@ -119,19 +153,26 @@ void atomicKernel_CPU(int *atom_arr, int no_of_threads)
             } while (old != expected);
 
             // Atomic compare-and-swap
+            // atom_arr[6] = atom_arr[6] == i - 1 ? i : atom_arr[6]
+            // and return the old value before swapping
             __sync_val_compare_and_swap(&atom_arr[6], i - 1, i);
 
             // Bitwise atomic instructions
 
             // Atomic AND
+            // atom_arr[7] = atom_arr[7] & (2 * i + 7)
+            // and return the old value before masking
             __sync_fetch_and_and(&atom_arr[7], 2 * i + 7);
 
             // Atomic OR
+            // atom_arr[8] = atom_arr[8] | (1 << i)
+            // and return the old value before masking
             __sync_fetch_and_or(&atom_arr[8], 1 << i);
 
             // Atomic XOR
-            // 11th element should be 0xff
-            __sync_fetch_and_xor(&atom_arr[9], i);
+            // atom_arr[9] = atom_arr[9] ^ i
+            // and return the old value before masking
+            __sync_fetch_and_xor(&atom_arr[9], i); // 11th element should be 0xff
         }
     }
 }
