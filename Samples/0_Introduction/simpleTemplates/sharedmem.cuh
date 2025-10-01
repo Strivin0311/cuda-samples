@@ -32,8 +32,7 @@
 // Because dynamically sized shared memory arrays are declared "extern",
 // we can't templatize them directly.  To get around this, we declare a
 // simple wrapper struct that will declare the extern array with a different
-// name depending on the type.  This avoids compiler errors about duplicate
-// definitions.
+// name depending on the type.  This avoids compiler errors about duplicate definitions.
 //
 // To use dynamically allocated shared memory in a templatized __global__ or
 // __device__ function, just replace code like this:
@@ -65,9 +64,7 @@
 //****************************************************************************
 
 // This is the un-specialized struct.  Note that we prevent instantiation of
-// this
-// struct by putting an undefined symbol in the function body so it won't
-// compile.
+// this struct by putting an undefined symbol in the function body so it won't compile.
 template <typename T> struct SharedMemory
 {
     // Ensure that we won't compile any un-specialized types

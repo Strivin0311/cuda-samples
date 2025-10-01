@@ -51,6 +51,9 @@
 // includes, kernels
 #include "sharedmem.cuh"
 
+// whether to explicitly specialize or not
+#define SPECIALIZED
+
 int g_TotalFailures = 0;
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -61,6 +64,12 @@ int g_TotalFailures = 0;
 template <class T> __global__ void testKernel(T *g_idata, T *g_odata)
 {
     // Shared mem size is determined by the host app at run time
+    // NOTE: directly use the normal as follows in the kernel:
+    //  extern __shared__  T sdata[];
+    // will result in compiler errors about duplicate definitions
+    // since `extern T sdata` will be a global variable namely `sdata_T` when specialized
+    // so if you call multiple functions which calls the testKernel with the same type T
+    // then you will get duplicate definition errors
     SharedMemory<T> smem;
     T              *sdata = smem.getPointer();
 
@@ -119,11 +128,16 @@ template <class T> class ArrayComparator
 public:
     bool compare(const T *reference, T *data, unsigned int len)
     {
+        #ifdef SPECIALIZED
         fprintf(stderr, "Error: no comparison function implemented for this type\n");
         return false;
+        #else
+        return compareData(reference, data, len, 0.15f, 0.0f);
+        #endif
     }
 };
 
+#ifdef SPECIALIZED
 // Here's the specialization for ints:
 template <> class ArrayComparator<int>
 {
@@ -143,6 +157,7 @@ public:
         return compareData(reference, data, len, 0.15f, 0.15f);
     }
 };
+#endif
 
 // Here's the generic wrapper for cutWriteFile*
 template <class T> class ArrayFileWriter
@@ -150,11 +165,16 @@ template <class T> class ArrayFileWriter
 public:
     bool write(const char *filename, T *data, unsigned int len, float epsilon)
     {
+        #ifdef SPECIALIZED
         fprintf(stderr, "Error: no file write function implemented for this type\n");
         return false;
+        #else
+        return sdkWriteFile(filename, data, len, epsilon, false);
+        #endif
     }
 };
 
+#ifdef SPECIALIZED
 // Here's the specialization for ints:
 template <> class ArrayFileWriter<int>
 {
@@ -174,6 +194,7 @@ public:
         return sdkWriteFile(filename, data, len, epsilon, false);
     }
 };
+#endif
 
 ////////////////////////////////////////////////////////////////////////////////
 //! Run a simple test for CUDA
