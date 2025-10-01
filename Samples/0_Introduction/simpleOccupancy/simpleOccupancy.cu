@@ -28,7 +28,7 @@
 #include <helper_cuda.h> // helper functions for CUDA error check
 #include <iostream>
 
-const int manualBlockSize = 32;
+const int manualBlockSize = 16;
 
 ////////////////////////////////////////////////////////////////////////////////
 // Test kernel
@@ -126,18 +126,17 @@ static int launchConfig(int *array, int arrayCount, bool automatic)
     else {
         // This block size is too small. Given limited number of
         // active blocks per multiprocessor, the number of active
-        // threads will be limited, and thus unable to achieve maximum
-        // occupancy.
-        //
+        // threads will be limited, and thus unable to achieve maximum occupancy.
         blockSize = manualBlockSize;
+
+        std::cout << "Manual block size: " << manualBlockSize << std::endl
+                  << "Manual grid size: " << (arrayCount + manualBlockSize - 1) / manualBlockSize << std::endl;
     }
 
     // Round up
-    //
     gridSize = (arrayCount + blockSize - 1) / blockSize;
 
     // Launch and profile
-    //
     checkCudaErrors(cudaEventRecord(start));
     square<<<gridSize, blockSize, dynamicSMemUsage>>>(array, arrayCount);
     checkCudaErrors(cudaEventRecord(end));
@@ -145,13 +144,11 @@ static int launchConfig(int *array, int arrayCount, bool automatic)
     checkCudaErrors(cudaDeviceSynchronize());
 
     // Calculate occupancy
-    //
     potentialOccupancy = reportPotentialOccupancy((void *)square, blockSize, dynamicSMemUsage);
 
     std::cout << "Potential occupancy: " << potentialOccupancy * 100 << "%" << std::endl;
 
     // Report elapsed time
-    //
     checkCudaErrors(cudaEventElapsedTime(&elapsedTime, start, end));
     std::cout << "Elapsed time: " << elapsedTime << "ms" << std::endl;
 
@@ -159,10 +156,8 @@ static int launchConfig(int *array, int arrayCount, bool automatic)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-// The test
-//
-// The test generates an array and squares it with a CUDA kernel, then
-// verifies the result.
+// The test generates an array and squares it with a CUDA kernel, 
+// then verifies the result.
 ////////////////////////////////////////////////////////////////////////////////
 static int test(bool automaticLaunchConfig, const int count = 1000000)
 {
@@ -189,7 +184,6 @@ static int test(bool automaticLaunchConfig, const int count = 1000000)
     checkCudaErrors(cudaFree(dArray));
 
     // Verify the return data
-    //
     for (int i = 0; i < count; i += 1) {
         if (array[i] != i * i) {
             std::cout << "element " << i << " expected " << i * i << " actual " << array[i] << std::endl;
@@ -210,7 +204,16 @@ static int test(bool automaticLaunchConfig, const int count = 1000000)
 ////////////////////////////////////////////////////////////////////////////////
 int main()
 {
+    int device;
     int status;
+    cudaDeviceProp prop;
+
+    checkCudaErrors(cudaGetDevice(&device));
+    checkCudaErrors(cudaGetDeviceProperties(&prop, device));
+
+    std::cout << "Device " << device << ": " << prop.name << std::endl;
+    std::cout << "maxBlocksPerMultiProcessor = " << prop.maxBlocksPerMultiProcessor << std::endl;
+    std::cout << "maxThreadsPerMultiProcessor = " << prop.maxThreadsPerMultiProcessor << std::endl << std::endl;
 
     std::cout << "starting Simple Occupancy" << std::endl << std::endl;
 
