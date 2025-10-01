@@ -41,6 +41,10 @@ if(${OpenMP_FOUND})
 
 target_compile_options(UnifiedMemoryStreams PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>)
 
+# We have to force adding -fopenmp to CUDA compilation flags
+# otherwise the omp is not working, as there's only a single thread running
+target_compile_options(UnifiedMemoryStreams PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler -fopenmp>)
+
 target_compile_features(UnifiedMemoryStreams PRIVATE cxx_std_17 cuda_std_17)
 
     set_target_properties(UnifiedMemoryStreams PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
@@ -52,3 +56,7 @@ target_compile_features(UnifiedMemoryStreams PRIVATE cxx_std_17 cuda_std_17)
 else()
     message(STATUS "OpenMP not found - will not build sample 'UnifiedMemoryStreams'")
 endif()
+
+# whether to use pthreads, otherwise use OpenMP, default is OFF
+option(USE_PTHREADS "Enable pthreads support" OFF)
+target_compile_definitions(UnifiedMemoryStreams PRIVATE $<$<BOOL:${USE_PTHREADS}>:USE_PTHREADS>)

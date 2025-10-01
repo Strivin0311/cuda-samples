@@ -41,6 +41,7 @@
 #include <omp.h>
 #endif
 #include <stdlib.h>
+#include <iostream>
 
 // cuBLAS
 #include <cublas_v2.h>
@@ -77,8 +78,9 @@ template <typename T> struct Task
         , data(NULL)
         , result(NULL)
     {
-        // allocate unified memory -- the operation performed in this example will
-        // be a DGEMV
+        // allocate unified memory -- the operation performed in this example will be a DGEMV
+        // `cudaMallocManaged` will allocates unified memory, and the returned device pointer
+        // is valid on the CPU and on all GPUs in the system that support managed memory
         checkCudaErrors(cudaMallocManaged(&data, sizeof(T) * size * size));
         checkCudaErrors(cudaMallocManaged(&result, sizeof(T) * size));
         checkCudaErrors(cudaMallocManaged(&vector, sizeof(T) * size));
@@ -156,10 +158,10 @@ void *execute(void *inpArgs)
 
         if (t.size < 100) {
             // perform on host
-            printf("Task [%d], thread [%d] executing on host (%d)\n", t.id, tid, t.size);
+            printf("Task [%d] with size [%d], thread [%d] executing on host\n", t.id, t.size, tid);
 
-            // attach managed memory to a (dummy) stream to allow host access while
-            // the device is running
+            // attach managed memory to a (dummy) stream to allow host access 
+            // while the device is running
             checkCudaErrors(cudaStreamAttachMemAsync(stream[0], t.data, 0, cudaMemAttachHost));
             checkCudaErrors(cudaStreamAttachMemAsync(stream[0], t.vector, 0, cudaMemAttachHost));
             checkCudaErrors(cudaStreamAttachMemAsync(stream[0], t.result, 0, cudaMemAttachHost));
@@ -170,7 +172,7 @@ void *execute(void *inpArgs)
         }
         else {
             // perform on device
-            printf("Task [%d], thread [%d] executing on device (%d)\n", t.id, tid, t.size);
+            printf("Task [%d] with size [%d], thread [%d] executing on device\n", t.id, t.size, tid);
             double one  = 1.0;
             double zero = 0.0;
 
@@ -192,10 +194,12 @@ template <typename T> void execute(Task<T> &t, cublasHandle_t *handle, cudaStrea
 {
     if (t.size < 100) {
         // perform on host
-        printf("Task [%d], thread [%d] executing on host (%d)\n", t.id, tid, t.size);
+        printf("Task [%d] with size [%d], thread [%d] executing on host\n", t.id, t.size, tid);
 
-        // attach managed memory to a (dummy) stream to allow host access while the
-        // device is running
+        // attach managed memory to a (dummy) stream to only allow host access with flag `cudaMemAttachHost`
+        // while the device is running
+        // then the CPU knows that the memory is safe to access 
+        // as long as the host ops are finished
         checkCudaErrors(cudaStreamAttachMemAsync(stream[0], t.data, 0, cudaMemAttachHost));
         checkCudaErrors(cudaStreamAttachMemAsync(stream[0], t.vector, 0, cudaMemAttachHost));
         checkCudaErrors(cudaStreamAttachMemAsync(stream[0], t.result, 0, cudaMemAttachHost));
@@ -206,12 +210,15 @@ template <typename T> void execute(Task<T> &t, cublasHandle_t *handle, cudaStrea
     }
     else {
         // perform on device
-        printf("Task [%d], thread [%d] executing on device (%d)\n", t.id, tid, t.size);
+        printf("Task [%d] with size [%d], thread [%d] executing on device\n", t.id, t.size, tid);
         double one  = 1.0;
         double zero = 0.0;
 
-        // attach managed memory to my stream
+        // before using the cublas API, we need to set the stream to the handle
         checkCudaErrors(cublasSetStream(handle[tid + 1], stream[tid + 1]));
+        // attach managed memory to my stream with flag `cudaMemAttachSingle`
+        // then the device knows that the memory is safe to access 
+        // as long as the device ops on my stream are finished
         checkCudaErrors(cudaStreamAttachMemAsync(stream[tid + 1], t.data, 0, cudaMemAttachSingle));
         checkCudaErrors(cudaStreamAttachMemAsync(stream[tid + 1], t.vector, 0, cudaMemAttachSingle));
         checkCudaErrors(cudaStreamAttachMemAsync(stream[tid + 1], t.result, 0, cudaMemAttachSingle));
@@ -235,6 +242,12 @@ template <typename T> void initialise_tasks(std::vector<Task<T>> &TaskList)
 
 int main(int argc, char **argv)
 {
+    #ifdef USE_PTHREADS
+    printf("Using pthreads\n");
+    #else
+    printf("Using OpenMP\n");
+    #endif
+
     // set device
     cudaDeviceProp device_prop;
     int            dev_id = findCudaDevice(argc, (const char **)argv);
@@ -264,6 +277,9 @@ int main(int argc, char **argv)
 
     // set number of threads
     const int nthreads = 4;
+    #ifndef USE_PTHREADS
+    std::cout << "OpenMP Max Threads: " << omp_get_max_threads() << std::endl;
+    #endif
 
     // number of streams = number of threads
     cudaStream_t   *streams = new cudaStream_t[nthreads + 1];
@@ -271,6 +287,7 @@ int main(int argc, char **argv)
 
     for (int i = 0; i < nthreads + 1; i++) {
         checkCudaErrors(cudaStreamCreate(&streams[i]));
+        // when using cublas API, we need to create the handle
         checkCudaErrors(cublasCreate(&handles[i]));
     }
 
@@ -314,7 +331,11 @@ int main(int argc, char **argv)
         pthread_join(threads[i], NULL);
     }
 #else
-    omp_set_num_threads(nthreads);
+    omp_set_num_threads(nthreads); 
+    // omp_set_dynamic(0);
+// `#pragma omp parallel` will create N threads for the later parallel region
+// `#pragma omp parallel for` will create N threads for the later for-loop
+// `schedule(dynamic)` will dynamically assign the tasks to the available threads
 #pragma omp parallel for schedule(dynamic)
     for (int i = 0; i < TaskList.size(); i++) {
         checkCudaErrors(cudaSetDevice(dev_id));
