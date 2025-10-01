@@ -25,8 +25,7 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-/* Template project which demonstrates the basics on how to setup a project
- * example application.
+/* Template project which demonstrates the basics on how to setup a project example application.
  * Host code.
  */
 
@@ -47,6 +46,10 @@
 // declaration, forward
 void runTest(int argc, char **argv);
 
+// Normally, C++ compiler will be applied with "Name Mangling",
+// which ensures that the name of the function is unique by adding some meta info to the func name
+// however, C does not support Name Mangling, so when we want the function to be compatible with C,
+// we need to use `extern "C"` prefix to skip name mangling
 extern "C" void computeGold(float *reference, float *idata, const unsigned int len);
 
 ////////////////////////////////////////////////////////////////////////////////
