@@ -36,8 +36,7 @@
 
 // Kernel #1 tests the across-the-warp vote(any) intrinsic.
 // If ANY one of the threads (within the warp) of the predicated condition
-// returns a non-zero value, then all threads within this warp will return a
-// non-zero value
+// returns a non-zero value, then all threads within this warp will return a non-zero value
 __global__ void VoteAnyKernel1(unsigned int *input, unsigned int *result, int size)
 {
     int tx = threadIdx.x;
@@ -48,8 +47,7 @@ __global__ void VoteAnyKernel1(unsigned int *input, unsigned int *result, int si
 
 // Kernel #2 tests the across-the-warp vote(all) intrinsic.
 // If ALL of the threads (within the warp) of the predicated condition returns
-// a non-zero value, then all threads within this warp will return a non-zero
-// value
+// a non-zero value, then all threads within this warp will return a non-zero value
 __global__ void VoteAllKernel2(unsigned int *input, unsigned int *result, int size)
 {
     int tx = threadIdx.x;
