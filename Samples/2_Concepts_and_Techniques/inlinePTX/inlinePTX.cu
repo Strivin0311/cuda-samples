@@ -47,6 +47,11 @@ __global__ void sequence_gpu(int *d_ptr, int length)
     if (elemID < length) {
         unsigned int laneid;
         // This command gets the lane ID within the current warp
+        // %0 is a placeholder for the return value
+        // %%laneid is a special system register to get the lane ID of the current thread in the warp
+        // "=r": is the output constraint for the first and only return value,
+        //  which indicates that the return value should be put into a general register
+        //  and assign to the variable "laneid"
         asm("mov.u32 %0, %%laneid;" : "=r"(laneid));
         d_ptr[elemID] = laneid;
     }
