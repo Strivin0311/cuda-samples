@@ -26,6 +26,7 @@
  */
 
 #include <algorithm>
+#include <random>
 #include <helper_cuda.h>
 #include <limits.h>
 #include <thrust/copy.h>
@@ -134,6 +135,7 @@ template <typename T, bool floatKeys> bool testSort(int argc, char **argv)
     }
 
     if (!keysOnly)
+        // fill up with the arrange values
         thrust::sequence(h_values.begin(), h_values.end());
 
     // Copy data onto the GPU
@@ -199,6 +201,57 @@ template <typename T, bool floatKeys> bool testSort(int argc, char **argv)
     return bTestResult;
 }
 
+
+void sortDevicePointerExample(int N) {
+    thrust::host_vector<int> h_data(N);
+    thrust::sequence(h_data.begin(), h_data.end()); // [0, 1, 2, ..., N-1]
+
+    std::random_device rd;
+    std::mt19937 g(rd());
+    std::shuffle(h_data.begin(), h_data.end(), g);     // shuffled [0, 1, 2, ..., N-1]
+
+    std::cout << "Original Host Data (first 10): ";
+    for (int i = 0; i < std::min(N, 10); ++i) {
+        std::cout << h_data[i] << " ";
+    }
+    std::cout << std::endl;
+
+    int* d_raw_ptr = nullptr;
+    checkCudaErrors(cudaMalloc((void**)&d_raw_ptr, N * sizeof(int)));
+
+    checkCudaErrors(cudaMemcpy(d_raw_ptr, h_data.data(), N * sizeof(int), cudaMemcpyHostToDevice));
+
+    // use thrust::device_ptr to wrap the raw pointer
+    // d_ptr_begin points to the beginning of the array
+    thrust::device_ptr<int> d_ptr_begin(d_raw_ptr);
+    // d_ptr_end points to the end of the array
+    thrust::device_ptr<int> d_ptr_end = d_ptr_begin + N;
+
+    // sort
+    std::cout << "Sorting " << N << " elements on device..." << std::endl;
+    thrust::sort(d_ptr_begin, d_ptr_end);
+    std::cout << "Sorting complete." << std::endl;
+
+    thrust::host_vector<int> h_sorted_data(N);
+    checkCudaErrors(cudaMemcpy(h_sorted_data.data(), d_raw_ptr, N * sizeof(int), cudaMemcpyDeviceToHost));
+
+    std::cout << "Sorted Host Data (first 10): ";
+    for (int i = 0; i < std::min(N, 10); ++i) {
+        std::cout << h_sorted_data[i] << " ";
+    }
+    std::cout << std::endl;
+
+    bool is_sorted = std::is_sorted(h_sorted_data.begin(), h_sorted_data.end());
+    if (is_sorted) {
+        std::cout << "Verification: Data is correctly sorted." << std::endl;
+    } else {
+        std::cout << "Verification: Data is NOT correctly sorted!" << std::endl;
+    }
+
+    checkCudaErrors(cudaFree(d_raw_ptr));
+}
+
+
 int main(int argc, char **argv)
 {
     // Start logs
@@ -214,4 +267,8 @@ int main(int argc, char **argv)
         bTestResult = testSort<unsigned int, false>(argc, argv);
 
     printf(bTestResult ? "Test passed\n" : "Test failed!\n");
+
+    printf("%s Additional tests for device pointers...\n\n", argv[0]);
+
+    sortDevicePointerExample(20);
 }
