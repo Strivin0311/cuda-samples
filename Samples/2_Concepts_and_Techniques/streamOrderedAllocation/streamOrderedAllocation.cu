@@ -110,7 +110,7 @@ int basicStreamOrderedAllocation(const int dev, const int nelem, const float *a,
     return errorNorm / refNorm < 1.e-6f ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
-// streamOrderedAllocationPostSync(): demonstrates If the application wants the
+// streamOrderedAllocationPostSync(): demonstrates if the application wants the
 // memory to persist in the pool beyond synchronization, then it sets the
 // release threshold on the pool. This way, when the application reaches the
 // "steady state", it is no longer allocating/freeing memory from the OS.
@@ -129,18 +129,22 @@ int streamOrderedAllocationPostSync(const int dev, const int nelem, const float 
     checkCudaErrors(cudaEventCreate(&start));
     checkCudaErrors(cudaEventCreate(&end));
 
+    // get the default memory pool
     checkCudaErrors(cudaDeviceGetDefaultMemPool(&memPool, dev));
+    
+    // set high release threshold on the default pool so that 
+    // `cudaMallocAsync` / `cudaFreeAsync` will not actually allocate / release memory to the system, respectively.
+    // By default, the release threshold for a memory pool is set to zero. 
+    // This implies that the CUDA driver is allowed to release a memory chunk 
+    // back to the system as long as it does not contain any active suballocations.
     uint64_t thresholdVal = ULONG_MAX;
-    // set high release threshold on the default pool so that cudaFreeAsync will
-    // not actually release memory to the system. By default, the release
-    // threshold for a memory pool is set to zero. This implies that the CUDA
-    // driver is allowed to release a memory chunk back to the system as long as
-    // it does not contain any active suballocations.
     checkCudaErrors(cudaMemPoolSetAttribute(memPool, cudaMemPoolAttrReleaseThreshold, (void *)&thresholdVal));
 
     // Record the start event
     checkCudaErrors(cudaEventRecord(start, stream));
     for (int i = 0; i < MAX_ITER; i++) {
+        // NOTE: `cudaMallocAsync` here might not actually allocate the memory
+        // but retrieve it from the memory pool
         checkCudaErrors(cudaMallocAsync(&d_a, bytes, stream));
         checkCudaErrors(cudaMallocAsync(&d_b, bytes, stream));
         checkCudaErrors(cudaMallocAsync(&d_c, bytes, stream));
@@ -151,6 +155,8 @@ int streamOrderedAllocationPostSync(const int dev, const int nelem, const float 
         dim3 grid((unsigned int)ceil(nelem / (float)block.x));
         vectorAddGPU<<<grid, block, 0, stream>>>(d_a, d_b, d_c, nelem);
 
+        // NOTE: `cudaFreeAsync` here might not actually free the memory back to system
+        // but return it to the pool.
         checkCudaErrors(cudaFreeAsync(d_a, stream));
         checkCudaErrors(cudaFreeAsync(d_b, stream));
         checkCudaErrors(cudaMemcpyAsync(c, d_c, bytes, cudaMemcpyDeviceToHost, stream));
