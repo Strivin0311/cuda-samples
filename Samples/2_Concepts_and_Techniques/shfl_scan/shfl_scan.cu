@@ -40,7 +40,7 @@
 
 #include "shfl_integral_image.cuh"
 
-// Scan using shfl - takes log2(n) steps
+// Scan using warp-level `__shfl_up_sync` - takes log2(n) steps (Hillis-Steele scan algorithm)
 // This function demonstrates basic use of the shuffle intrinsic, __shfl_up,
 // to perform a scan operation across a block.
 // First, it performs a scan (prefix sum in this case) inside a warp
@@ -59,9 +59,9 @@ __global__ void shfl_scan_test(int *data, int width, int *partial_sums = NULL)
     int                   lane_id = id % warpSize;
     // determine a warp_id within a block
     int warp_id = threadIdx.x / warpSize;
+    int lane_id = threadIdx.x % warpSize;
 
-    // Below is the basic structure of using a shfl instruction
-    // for a scan.
+    // Below is the basic structure of using a shfl instruction for a scan.
     // Record "value" as a variable - we accumulate it along the way
     int value = data[id];
 
@@ -73,11 +73,11 @@ __global__ void shfl_scan_test(int *data, int width, int *partial_sums = NULL)
     // creates the scan sum.
 
 #pragma unroll
-    for (int i = 1; i <= width; i *= 2) {
+    for (int stride = 1; stride <= width; stride *= 2) { // width is default warpSize, as a single group
         unsigned int mask = 0xffffffff;
-        int          n    = __shfl_up_sync(mask, value, i, width);
+        int          n    = __shfl_up_sync(mask, value, stride, width);
 
-        if (lane_id >= i)
+        if (lane_id >= stride)
             value += n;
     }
 
@@ -85,24 +85,25 @@ __global__ void shfl_scan_test(int *data, int width, int *partial_sums = NULL)
     // next sum the largest values for each warp
 
     // write the sum of the warp to smem
-    if (threadIdx.x % warpSize == warpSize - 1) {
+    // by the last lane
+    if (lane_id == warpSize - 1) {
         sums[warp_id] = value;
     }
 
     __syncthreads();
 
-    //
     // scan sum the warp sums
     // the same shfl scan operation, but performed on warp sums
-    //
-    if (warp_id == 0 && lane_id < (blockDim.x / warpSize)) {
+    // by the first num_warps thread in the first warp
+    auto numWarps = blockDim.x / warpSize;
+    if (warp_id == 0 && lane_id < numWarps) {
         int warp_sum = sums[lane_id];
 
-        int mask = (1 << (blockDim.x / warpSize)) - 1;
-        for (int i = 1; i <= (blockDim.x / warpSize); i *= 2) {
-            int n = __shfl_up_sync(mask, warp_sum, i, (blockDim.x / warpSize));
+        int mask = (1 << numWarps) - 1;
+        for (int stride = 1; stride <= numWarps; stride *= 2) {
+            int n = __shfl_up_sync(mask, warp_sum, stride, numWarps);
 
-            if (lane_id >= i)
+            if (lane_id >= stride)
                 warp_sum += n;
         }
 
@@ -113,6 +114,7 @@ __global__ void shfl_scan_test(int *data, int width, int *partial_sums = NULL)
 
     // perform a uniform add across warps in the block
     // read neighbouring warp's sum and add it to threads value
+    // by each thread in the block
     int blockSum = 0;
 
     if (warp_id > 0) {
@@ -125,6 +127,10 @@ __global__ void shfl_scan_test(int *data, int width, int *partial_sums = NULL)
     data[id] = value;
 
     // last thread has sum, write write out the block's sum
+    // which is used later to compute the prefix sum of each block
+    // and then uniformly add to each data
+    // NOTE: this can be done in this kernel as well 
+    // as long as we use cooperative group across blocks
     if (partial_sums != NULL && threadIdx.x == blockDim.x - 1) {
         partial_sums[blockIdx.x] = value;
     }
@@ -149,7 +155,9 @@ __global__ void uniform_add(int *data, int *partial_sums, int len)
 
 static unsigned int iDivUp(unsigned int dividend, unsigned int divisor)
 {
-    return ((dividend % divisor) == 0) ? (dividend / divisor) : (dividend / divisor + 1);
+    // return ((dividend % divisor) == 0) ? (dividend / divisor) : (dividend / divisor + 1);
+    // The above way is not the most efficient and elegant way
+    return (dividend + divisor - 1) / divisor;
 }
 
 // This function verifies the shuffle scan result, for the simple
