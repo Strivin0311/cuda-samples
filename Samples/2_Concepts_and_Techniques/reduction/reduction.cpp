@@ -153,7 +153,7 @@ int main(int argc, char **argv)
         break;
     }
 
-    printf(bResult ? "Test passed\n" : "Test failed!\n");
+    printf(bResult ? "\nTest passed\n" : "\nTest failed!\n");
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -179,6 +179,7 @@ template <class T> T reduceCPU(T *data, int size)
     return sum;
 }
 
+// 0 -> 0, 1 -> 1, 2^n -> 2^n, x -> nextPow2(x)
 unsigned int nextPow2(unsigned int x)
 {
     --x;
@@ -374,7 +375,7 @@ template <class T> void shmoo(int minN, int maxN, int maxThreads, int maxBlocks,
         reduce<T>(maxN, maxThreads, maxNumBlocks, kernel, d_idata, d_odata);
     }
 
-    int testIterations = 100;
+    int testIterations = 300;
 
     StopWatchInterface *timer = 0;
     sdkCreateTimer(&timer);
@@ -439,7 +440,7 @@ template <class T> bool runTest(int argc, char **argv, ReduceType datatype)
 {
     int  size              = 1 << 24; // number of elements to reduce
     int  maxThreads        = 256;     // number of threads per block
-    int  whichKernel       = 7;
+    int  whichKernel       = 7;       // reduce kernel version
     int  maxBlocks         = 64;
     bool cpuFinalReduction = false;
     int  cpuFinalThreshold = 1;

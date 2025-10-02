@@ -113,11 +113,15 @@ template <class T> __global__ void reduce0(T *g_idata, T *g_odata, unsigned int 
 
     sdata[tid] = (i < n) ? g_idata[i] : 0;
 
+    // Alternatives:
+    //  1. cta.sync();
+    //  2. __syncthreads();
     cg::sync(cta);
 
     // do reduction in shared mem
     for (unsigned int s = 1; s < blockDim.x; s *= 2) {
         // modulo arithmetic is slow!
+        // since no whole warp is active
         if ((tid % (2 * s)) == 0) {
             sdata[tid] += sdata[tid + s];
         }
@@ -152,6 +156,11 @@ template <class T> __global__ void reduce1(T *g_idata, T *g_odata, unsigned int 
         int index = 2 * s * tid;
 
         if (index < blockDim.x) {
+            // interleaved addressing results in bank conflicts
+            // e.g. assuming blockDim.x = 256, numBanks = 32
+            // when s = 1, then each tid will access sdata[2*tid] and sdata[2*tid+1]
+            // so for the first warp, lanei and lane(i + 16) will access same bank
+            // since (2*tid % numBanks) == (2*(tid + 16) % numBanks)
             sdata[index] += sdata[index + s];
         }
 
@@ -183,6 +192,16 @@ template <class T> __global__ void reduce2(T *g_idata, T *g_odata, unsigned int 
     // do reduction in shared mem
     for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
         if (tid < s) {
+            // assuming blockDim.x = 256, numBanks = 32:
+            // 1. no warp divergence (mostly)
+            //  since when s >= 32, the contiguous threads in any warp will get into here together
+            //  and when s < 32, only the first warp will diverge
+            // 2. no bank conflicts (totally)
+            //  since when s >= 32, only (tid % numBanks) and ((tid + s) % numBanks) will access same bank
+            //  which assigns to the same thread
+            //  when s < 32, only the first warp will get into here 
+            //  and every thread will access different bank
+            //  even for its own two accesses of (tid % numBanks) and ((tid + s) % numBanks)
             sdata[tid] += sdata[tid + s];
         }
 
@@ -209,6 +228,8 @@ template <class T> __global__ void reduce3(T *g_idata, T *g_odata, unsigned int 
     unsigned int tid = threadIdx.x;
     unsigned int i   = blockIdx.x * (blockDim.x * 2) + threadIdx.x;
 
+    // each thread processes two elements's reduction from the global data
+    // then we only need half number of threads and half of the shared memory
     T mySum = (i < n) ? g_idata[i] : 0;
 
     if (i + blockDim.x < n)
@@ -265,6 +286,9 @@ template <class T, unsigned int blockSize> __global__ void reduce4(T *g_idata, T
     cg::sync(cta);
 
     // do reduction in shared mem
+    // NOTE: here s stops at 32, since the last few reduces are left
+    // to the `shuffle_down_sync` operation within the first warp
+    // so we don't have to sync all threads in the block while there's only one warp active
     for (unsigned int s = blockDim.x / 2; s > 32; s >>= 1) {
         if (tid < s) {
             sdata[tid] = mySum = mySum + sdata[tid + s];
@@ -273,9 +297,9 @@ template <class T, unsigned int blockSize> __global__ void reduce4(T *g_idata, T
         cg::sync(cta);
     }
 
-    cg::thread_block_tile<32> tile32 = cg::tiled_partition<32>(cta);
-
+    // the first warp use `shuffle_down_sync` to apply the last few reduces
     if (cta.thread_rank() < 32) {
+        cg::thread_block_tile<32> tile32 = cg::tiled_partition<32>(cta);
         // Fetch final intermediate sum from 2nd warp
         if (blockSize >= 64)
             mySum += sdata[tid + 32];
@@ -295,8 +319,7 @@ template <class T, unsigned int blockSize> __global__ void reduce4(T *g_idata, T
     shuffle is used within a loop.  It uses a template parameter to achieve
     optimal code for any (power of 2) number of threads.  This requires a switch
     statement in the host code to handle all the different thread block sizes at
-    compile time. When shuffle is available, it is used to reduce warp
-   synchronization.
+    compile time. When shuffle is available, it is used to reduce warp synchronization.
 
     Note, this kernel needs a minimum of 64*sizeof(T) bytes of shared memory.
     In other words if blockSize <= 32, allocate 64*sizeof(T) bytes.
@@ -321,7 +344,7 @@ template <class T, unsigned int blockSize> __global__ void reduce5(T *g_idata, T
     sdata[tid] = mySum;
     cg::sync(cta);
 
-    // do reduction in shared mem
+    // do reduction in shared mem in a manually unrolled fashion
     if ((blockSize >= 512) && (tid < 256)) {
         sdata[tid] = mySum = mySum + sdata[tid + 256];
     }
@@ -340,9 +363,8 @@ template <class T, unsigned int blockSize> __global__ void reduce5(T *g_idata, T
 
     cg::sync(cta);
 
-    cg::thread_block_tile<32> tile32 = cg::tiled_partition<32>(cta);
-
     if (cta.thread_rank() < 32) {
+        cg::thread_block_tile<32> tile32 = cg::tiled_partition<32>(cta);
         // Fetch final intermediate sum from 2nd warp
         if (blockSize >= 64)
             mySum += sdata[tid + 32];
@@ -361,6 +383,25 @@ template <class T, unsigned int blockSize> __global__ void reduce5(T *g_idata, T
     This version adds multiple elements per thread sequentially.  This reduces
    the overall cost of the algorithm while keeping the work complexity O(n) and
    the step complexity O(log n). (Brent's Theorem optimization)
+
+    Brent's Theorem: if all the works for a job can be represented as a DAG,
+    where each node denotes some atomic sub-job, which can be executed in one clock cycle,
+    each edge denotes a dependency relationship between two sub-jobs, 
+    and we use T(p) to denote the total execution time, given the number of processors p,
+    then we have:
+
+    T(∞) < T(1)/p <= T(p) <= T(1)/p + T(∞)
+
+    where T(1) is the execution time with only one processor, i.e. the number of nodes in the DAG,
+    T(∞) is the execution time with infinite processors, i.e. the length of the critical path, called the "depth" d of the DAG,
+    which can be used to determine how "parallel" is the job, e.g. the depth of the reduction job is logn.
+
+    so T(p) won't be faster than T(1)/p even there's no data dependency,
+    and T(p) will also not be slower than T(1)/p + T(∞), since we can let all nodes within each depth to be parallel by p,
+    then T(p) <= ∑(i=1->d) ⌈(ti / p)⌉ <= ∑(i=1->d) ((ti / p) + 1) = T(1)/p + T(∞),
+
+    where the first term is often called "work complexity", denoting the amount of the job,
+    and the second term is called "step complexity", denoting the "parallelizability" of the job.
 
     Note, this kernel needs a minimum of 64*sizeof(T) bytes of shared memory.
     In other words if blockSize <= 32, allocate 64*sizeof(T) bytes.
@@ -383,13 +424,13 @@ template <class T, unsigned int blockSize, bool nIsPow2> __global__ void reduce6
     // number of active thread blocks (via gridDim).  More blocks will result
     // in a larger gridSize and therefore fewer elements per thread
     if (nIsPow2) {
-        unsigned int i = blockIdx.x * blockSize * 2 + threadIdx.x;
-        gridSize       = gridSize << 1;
+        unsigned int i = blockIdx.x * blockSize * 2 + threadIdx.x; // each thread reads two elements at one loop
+        gridSize       = gridSize << 1; // double the gridSize
 
         while (i < n) {
             mySum += g_idata[i];
-            // ensure we don't read out of bounds -- this is optimized away for
-            // powerOf2 sized arrays
+            // ensure we don't read out of bounds
+            // this is optimized away for powerOf2 sized arrays
             if ((i + blockSize) < n) {
                 mySum += g_idata[i + blockSize];
             }
@@ -408,7 +449,7 @@ template <class T, unsigned int blockSize, bool nIsPow2> __global__ void reduce6
     sdata[tid] = mySum;
     cg::sync(cta);
 
-    // do reduction in shared mem
+    // do reduction in shared mem in a manually unrolled fashion
     if ((blockSize >= 512) && (tid < 256)) {
         sdata[tid] = mySum = mySum + sdata[tid + 256];
     }
@@ -453,9 +494,17 @@ __global__ void reduce7(const T *__restrict__ g_idata, T *__restrict__ g_odata, 
     // reading from global memory, writing to shared memory
     unsigned int tid        = threadIdx.x;
     unsigned int gridSize   = blockSize * gridDim.x;
-    unsigned int maskLength = (blockSize & 31); // 31 = warpSize-1
-    maskLength              = (maskLength > 0) ? (32 - maskLength) : maskLength;
-    const unsigned int mask = (0xffffffff) >> maskLength;
+    
+    // NOTE: the mask calculation below might be incorrect since it gives the same mask to all warps
+    // which should be only applied to the last warp
+    // unsigned int maskLength = (blockSize & 31); // equals to `blockSize % 32`, i.e. the number of active threads in the last warp
+    // maskLength              = (maskLength > 0) ? (32 - maskLength) : maskLength; // the number of inactive threads in the last warp
+    // const unsigned int mask = (0xffffffff) >> maskLength;
+    unsigned int warpId = tid / warpSize;
+    unsigned int warpStart = warpId * warpSize;
+    unsigned int warpEnd = min((warpId + 1) * warpSize, blockSize);
+    unsigned int warpActiveThreads = warpEnd - warpStart;
+    const unsigned int mask = (0xffffffff) >> (32 - warpActiveThreads);
 
     T mySum = 0;
 
@@ -484,24 +533,30 @@ __global__ void reduce7(const T *__restrict__ g_idata, T *__restrict__ g_odata, 
         }
     }
 
-    // Reduce within warp using shuffle or reduce_add if T==int & CUDA_ARCH ==
-    // SM 8.0
+    // Reduce within warp using shuffle or reduce_add if T==int & CUDA_ARCH >= SM 8.0
     mySum = warpReduceSum<T>(mask, mySum);
 
-    // each thread puts its local sum into shared memory
+    // each lane0 puts its local sum into shared memory
+    // NOTE: here we do not need blockSize of shared memory
+    // but only numWarps of shared memory
     if ((tid % warpSize) == 0) {
         sdata[tid / warpSize] = mySum;
     }
 
     __syncthreads();
 
-    const unsigned int shmem_extent  = (blockSize / warpSize) > 0 ? (blockSize / warpSize) : 1;
-    const unsigned int ballot_result = __ballot_sync(mask, tid < shmem_extent);
+    // Now we have numWarps of partial sums in shared memory
+    // so we need first numWarps threads to do final reduction
+    const unsigned int shmem_extent  = (blockSize / warpSize) > 0 ? (blockSize / warpSize) : 1; // numWarps
+    // __ballot_sync(unsigned mask, predicate):
+    // evaluate predicate for all non-exited threads in mask 
+    // and return an integer whose Nth bit is set if and only if 
+    // predicate evaluates to non-zero for the Nth thread of the warp and the Nth thread is active.
+    const unsigned int ballot_mask = __ballot_sync(mask, tid < shmem_extent);
     if (tid < shmem_extent) {
         mySum = sdata[tid];
-        // Reduce final warp using shuffle or reduce_add if T==int & CUDA_ARCH ==
-        // SM 8.0
-        mySum = warpReduceSum<T>(ballot_result, mySum);
+        // Reduce final warp using shuffle or reduce_add if T==int & CUDA_ARCH >= SM 8.0
+        mySum = warpReduceSum<T>(ballot_mask, mySum);
     }
 
     // write result for this block to global mem
