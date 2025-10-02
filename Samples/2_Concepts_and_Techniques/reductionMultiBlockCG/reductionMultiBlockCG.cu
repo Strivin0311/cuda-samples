@@ -89,27 +89,34 @@ namespace cg = cooperative_groups;
 __device__ void reduceBlock(double *sdata, const cg::thread_block &cta)
 {
     const unsigned int        tid    = cta.thread_rank();
+
+    // first reduce in the warp
+    // NOTE: cg::reduce(tile, local_data_this_thread, op)
+    // will reduce the local_data each thread within the warp
+    // and return the reduced result
     cg::thread_block_tile<32> tile32 = cg::tiled_partition<32>(cta);
-
     sdata[tid] = cg::reduce(tile32, sdata[tid], cg::plus<double>());
-    cg::sync(cta);
+    cg::sync(cta); // block-level sync
 
+    // second reduce the partial sum per warp
+    // by thread0 in the block
     double beta = 0.0;
     if (cta.thread_rank() == 0) {
         beta = 0;
+        // NOTE: here we get the partial sum per warp from the lane0's data
+        // however, it's the same to use other lanes, since we've already assigned the same result to each lane
         for (int i = 0; i < blockDim.x; i += tile32.size()) {
             beta += sdata[i];
         }
         sdata[0] = beta;
     }
-    cg::sync(cta);
+    cg::sync(cta); // block-level sync
 }
 
-// This reduction kernel reduces an arbitrary size array in a single kernel
-// invocation
+// This reduction kernel reduces an arbitrary size array in a single kernel invocation
 //
-// For more details on the reduction algorithm (notably the multi-pass
-// approach), see the "reduction" sample in the CUDA SDK.
+// For more details on the reduction algorithm (notably the multi-pass approach), 
+// see the "reduction" sample in the CUDA SDK.
 extern "C" __global__ void reduceSinglePassMultiBlockCG(const float *g_idata, float *g_odata, unsigned int n)
 {
     // Handle to thread block group
@@ -118,23 +125,27 @@ extern "C" __global__ void reduceSinglePassMultiBlockCG(const float *g_idata, fl
 
     extern double __shared__ sdata[];
 
-    // Stride over grid and add the values to a shared memory buffer
+    // First level of reduction: 
+    // each thread strides over grid 
+    // and add the values to a shared memory sdata with a size of blockSize
     sdata[block.thread_rank()] = 0;
-
     for (int i = grid.thread_rank(); i < n; i += grid.size()) {
         sdata[block.thread_rank()] += g_idata[i];
     }
+    cg::sync(block);// block-level sync
 
-    cg::sync(block);
-
-    // Reduce each block (called once per block)
+    // Second level of reduction:
+    // each block reduces the sharded memory 
+    // and writes to the block-level partial sum to sdata[0]
     reduceBlock(sdata, block);
-    // Write out the result to global memory
+    // Write out the result sdata[0] to global memory
     if (block.thread_rank() == 0) {
         g_odata[blockIdx.x] = sdata[0];
     }
-    cg::sync(grid);
+    cg::sync(grid); // grid-level sync
 
+    // Third level of reduction:
+    // the thread0 in the whole grid reduces the partial sum for each block to g_odata[0]
     if (grid.thread_rank() == 0) {
         for (int block = 1; block < gridDim.x; block++) {
             g_odata[0] += g_odata[block];
@@ -157,6 +168,7 @@ void call_reduceSinglePassMultiBlockCG(int size, int threads, int numBlocks, flo
     dim3 dimBlock(threads, 1, 1);
     dim3 dimGrid(numBlocks, 1, 1);
 
+    // we have to use cooperative launch since the kernel uses cooperative-group sync
     cudaLaunchCooperativeKernel((void *)reduceSinglePassMultiBlockCG, dimGrid, dimBlock, kernelArgs, smemSize, NULL);
     // check if kernel execution generated an error
     getLastCudaError("Kernel execution failed");
