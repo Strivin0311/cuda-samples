@@ -37,13 +37,88 @@ namespace cg = cooperative_groups;
 // Must be a power of two
 #define THREADBLOCK_SIZE 256
 
+
 ////////////////////////////////////////////////////////////////////////////////
-// Basic scan codelets
+//  Two-Phase Inclusive Prefix Sum Kernel (Blelloch scan algorithm)
 ////////////////////////////////////////////////////////////////////////////////
-// Naive inclusive scan: O(N * log2(N)) operations
+// This kernel assumes blockDim.x is a power of 2.
+// It processes one block of elements, handling potential out-of-bounds access
+// for the last block if N is not a multiple of blockDim.x.
+// and this kernel's "Work Complexity" is O(N), "Parallel Time Complexity" is O(logN)
+// thus it is a work-optimal algorithm, since the non-parallel work is still O(N)
+__global__ void inclusive_prefix_sum_kernel(int* d_input, int* d_output, int N) {
+    // Dynamically allocated shared memory; size is specified at kernel launch via the 3rd parameter
+    extern __shared__ int s_data[]; 
+
+    int tid = threadIdx.x;                      // Thread index inside the block
+    int block_start_idx = blockIdx.x * blockDim.x; // Global start index for this block
+    int global_idx = block_start_idx + tid;     // Global index for the current thread
+
+    // Load data from global memory to shared memory
+    // Also keep the original value for the final inclusive conversion
+    int original_val = 0; 
+    if (global_idx < N) {
+        original_val = d_input[global_idx];
+    }
+    s_data[tid] = original_val;                 // Store original value in shared memory
+    __syncthreads();                            // Ensure all threads have loaded their data
+
+    // Phase 1: Up-Sweep (Reduction)
+    // Loop variable s is the current stride (1, 2, 4, ...)
+    for (unsigned int s = 1; s < blockDim.x; s <<= 1) { 
+        __syncthreads();                        // Wait for the previous step to finish
+        
+        // Only threads meeting the condition perform the update:
+        // tid must be >= s (left element exists) and must be the rightmost element
+        // of the current segment of length 2*s (tid % (2*s) == 2*s - 1)
+        if ((tid >= s) && ((tid % (2 * s)) == (2 * s - 1))) {
+            s_data[tid] += s_data[tid - s];     // Add left element to right element
+        }
+    }
+    // After this phase, s_data[blockDim.x - 1] contains the total sum of the block.
+    // Other elements store intermediate sums.
+
+    // Phase 2: Down-Sweep (Scan)
+
+    // 1. Set the last element to 0 to prepare for exclusive scan
+    if (tid == blockDim.x - 1) {                // Only the last thread in the block
+        s_data[blockDim.x - 1] = 0;             // Zero the total to turn the reduction into exclusive scan
+    }
+    __syncthreads();                            // Ensure the last element has been zeroed
+
+    // 2. Down-sweep loop
+    // Loop variable s runs backwards from blockDim.x/2 down to 1 (4, 2, 1, ...)
+    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) { 
+        __syncthreads();                        // Synchronize every step
+        
+        // Only threads meeting the condition perform the update:
+        // tid must be >= s and must be the rightmost element of the current segment
+        if ((tid >= s) && ((tid % (2 * s)) == (2 * s - 1))) {
+            int val_left_child = s_data[tid - s]; // Save original value of left child
+            s_data[tid - s] = s_data[tid];        // Left child gets parent's value (its right sibling)
+            s_data[tid] += val_left_child;        // Right child adds the original left-child value
+        }
+    }
+    // After this phase, s_data contains the exclusive prefix sum for the block.
+    // Example: [0, a, a+b, a+b+c, ...]
+
+    // Final step: convert exclusive prefix sum to inclusive and write to global memory
+    // inclusive_sum[i] = exclusive_sum[i] + original_input[i]
+    if (global_idx < N) {
+        d_output[global_idx] = s_data[tid] + original_val;
+    }
+}
+
+
+////////////////////////////////////////////////////////////////////////////////
+// Basic scan codelets (Hillis-Steele scan algorithm)
+////////////////////////////////////////////////////////////////////////////////
+// Naive inclusive scan:
 // Allocate 2 * 'size' local memory, initialize the first half
-// with 'size' zeros avoiding if(pos >= offset) condition evaluation
-// and saving instructions
+// with 'size' zeros avoiding if(pos >= offset) condition evaluation and saving instructions
+// and this kernel's "Work Complexity" is O(NlogN), "Parallel Time Complexity" is O(logN)
+// thus it is not a work-optimal algorithm, since the non-parallel work is O(N), and it offers logN times of work
+// though it has the same optimal parallel time complexity
 inline __device__ uint scan1Inclusive(uint idata, volatile uint *s_Data, uint size, cg::thread_block cta)
 {
     uint pos    = 2 * threadIdx.x - (threadIdx.x & (size - 1));
@@ -84,8 +159,7 @@ inline __device__ uint4 scan4Inclusive(uint4 idata4, volatile uint *s_Data, uint
     return idata4;
 }
 
-// Exclusive vector scan: the array to be scanned is stored
-// in local thread memory scope as uint4
+// Exclusive vector scan: the array to be scanned is stored in local thread memory scope as uint4
 inline __device__ uint4 scan4Exclusive(uint4 idata4, volatile uint *s_Data, uint size, cg::thread_block cta)
 {
     uint4 odata4 = scan4Inclusive(idata4, s_Data, size, cta);
@@ -188,7 +262,10 @@ extern "C" void initScan(void)
 
 extern "C" void closeScan(void) { checkCudaErrors(cudaFree(d_Buf)); }
 
-static uint factorRadix2(uint &log2L, uint L)
+// `factorRadix2` will factorize L into L = 2^power_factor * odd_factor
+// e.g. L = 12 = 2^2 * 3; L = 7 = 2^0 * 7; L = 16 = 2^4 * 1
+// where power_factor will be store into `log2L` and odd_factor will be returned
+static inline uint factorRadix2(uint &log2L, uint L)
 {
     if (!L) {
         log2L = 0;
@@ -202,17 +279,23 @@ static uint factorRadix2(uint &log2L, uint L)
     }
 }
 
-static uint iDivUp(uint dividend, uint divisor)
+static inline bool isPowerOf2(uint x) { return ((x != 0) && ((x & (x - 1)) == 0)); }
+
+static inline uint iDivUp(uint dividend, uint divisor)
 {
-    return ((dividend % divisor) == 0) ? (dividend / divisor) : (dividend / divisor + 1);
+    // return ((dividend % divisor) == 0) ? (dividend / divisor) : (dividend / divisor + 1);
+    // The above way is not the most efficient and elegant way
+    return (dividend + divisor - 1) / divisor;
 }
 
 extern "C" size_t scanExclusiveShort(uint *d_Dst, uint *d_Src, uint batchSize, uint arrayLength)
 {
     // Check power-of-two factorization
-    uint log2L;
-    uint factorizationRemainder = factorRadix2(log2L, arrayLength);
-    assert(factorizationRemainder == 1);
+    // uint log2L;
+    // uint factorizationRemainder = factorRadix2(log2L, arrayLength);
+    // assert(factorizationRemainder == 1); // then arrayLength is a power of 2
+    // The above way is not the most efficient and elegant way
+    assert(isPowerOf2(arrayLength));
 
     // Check supported size range
     assert((arrayLength >= MIN_SHORT_ARRAY_SIZE) && (arrayLength <= MAX_SHORT_ARRAY_SIZE));
@@ -223,6 +306,7 @@ extern "C" size_t scanExclusiveShort(uint *d_Dst, uint *d_Src, uint batchSize, u
     // Check all threadblocks to be fully packed with data
     assert((batchSize * arrayLength) % (4 * THREADBLOCK_SIZE) == 0);
 
+    // vectorize the uint data to uint4
     scanExclusiveShared<<<(batchSize * arrayLength) / (4 * THREADBLOCK_SIZE), THREADBLOCK_SIZE>>>(
         (uint4 *)d_Dst, (uint4 *)d_Src, arrayLength);
     getLastCudaError("scanExclusiveShared() execution FAILED\n");
@@ -230,12 +314,16 @@ extern "C" size_t scanExclusiveShort(uint *d_Dst, uint *d_Src, uint batchSize, u
     return THREADBLOCK_SIZE;
 }
 
+// The following function is for large array
+// whose array size > 4 * THREADBLOCK_SIZE
 extern "C" size_t scanExclusiveLarge(uint *d_Dst, uint *d_Src, uint batchSize, uint arrayLength)
 {
     // Check power-of-two factorization
-    uint log2L;
-    uint factorizationRemainder = factorRadix2(log2L, arrayLength);
-    assert(factorizationRemainder == 1);
+    // uint log2L;
+    // uint factorizationRemainder = factorRadix2(log2L, arrayLength);
+    // assert(factorizationRemainder == 1); // then arrayLength is a power of 2
+    // The above way is not the most efficient and elegant way
+    assert(isPowerOf2(arrayLength));
 
     // Check supported size range
     assert((arrayLength >= MIN_LARGE_ARRAY_SIZE) && (arrayLength <= MAX_LARGE_ARRAY_SIZE));
@@ -248,8 +336,7 @@ extern "C" size_t scanExclusiveLarge(uint *d_Dst, uint *d_Src, uint batchSize, u
     getLastCudaError("scanExclusiveShared() execution FAILED\n");
 
     // Not all threadblocks need to be packed with input data:
-    // inactive threads of highest threadblock just don't do global reads and
-    // writes
+    // inactive threads of highest threadblock just don't do global reads and writes
     const uint blockCount2 = iDivUp((batchSize * arrayLength) / (4 * THREADBLOCK_SIZE), THREADBLOCK_SIZE);
     scanExclusiveShared2<<<blockCount2, THREADBLOCK_SIZE>>>((uint *)d_Buf,
                                                             (uint *)d_Dst,
