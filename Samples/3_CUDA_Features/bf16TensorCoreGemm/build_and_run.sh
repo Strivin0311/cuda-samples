@@ -6,7 +6,7 @@ BUILD_ROOT=build
 TARGET=bf16TensorCoreGemm
 
 # default not skip any step
-SKIP_BUILD=true
+SKIP_BUILD=false
 SKIP_RUN=false
 SKIP_PROFILE=true
 
@@ -39,6 +39,7 @@ if [ "$SKIP_BUILD" = false ]; then
 
     rm -rf $BUILD_ROOT && mkdir -p $BUILD_ROOT && cd $BUILD_ROOT || exit
 
+    # turn `-DCPU_DEBUG=ON` on if you want to enable CPU verification
     cmake -DCMAKE_CUDA_ARCHITECTURES="75;80;86;89;90;100" -DCPU_DEBUG=OFF ..
     make -j8 || exit
 
@@ -51,7 +52,7 @@ fi
 
 # run
 
-CMD="./$BUILD_ROOT/$TARGET --kernel=2"
+CMD="./$BUILD_ROOT/$TARGET --kernel=0" # default: bf16mma_shmem_gemm_async_copy
 
 if [ "$SKIP_RUN" = false ]; then
     echo "$SEP"

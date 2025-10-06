@@ -386,7 +386,7 @@ __global__ void compute_gemm(const half *A, const half *B, const float *C, float
     }
 }
 
-// Performs an MxNxK GEMM (C=alpha*A*B + beta*C) assuming:
+// Performs an MxNxK GEMM (D = alpha*A*B + beta*C) assuming:
 //  1) Matrices are packed in memory.
 //  2) M, N and K are multiples of 16.
 //  3) Neither A nor B are transposed.
@@ -407,6 +407,7 @@ simple_wmma_gemm(half *a, half *b, float *c, float *d, int m, int n, int k, floa
     wmma::fragment<wmma::accumulator, M, N, K, float>              acc_frag;
     wmma::fragment<wmma::accumulator, M, N, K, float>              c_frag;
 
+    // zero-init the acc fragment
     wmma::fill_fragment(acc_frag, 0.0f);
 
     // Loop over k
@@ -558,7 +559,7 @@ int main(int argc, char **argv)
 
     if (checkCmdLineFlag(argc, (const char **)argv, "kernel")) {
         int kernel_number = getCmdLineArgumentInt(argc, (const char **)argv, "kernel");
-        if (kernel_number < 3) {
+        if (kernel_number < 2) {
             selected_kernel = (kernels)kernel_number;
         }
         else {
