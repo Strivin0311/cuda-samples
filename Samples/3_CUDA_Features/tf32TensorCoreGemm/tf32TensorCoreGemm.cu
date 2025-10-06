@@ -94,9 +94,15 @@
 
 // GEMM configuration.
 
-#define M_TILES 512
-#define N_TILES 512
+#if CPU_DEBUG
+#define M_TILES 16
+#define N_TILES 16
+#define K_TILES 8
+#else
+#define M_TILES 1024
+#define N_TILES 1024
 #define K_TILES 512
+#endif
 
 #define M_GLOBAL (M * M_TILES)
 #define N_GLOBAL (N * N_TILES)
@@ -174,7 +180,7 @@ enum kernels {
     simple_tf32mma_gemm           = 2  // tf32 MMA non-shmem using simple kernel.
 };
 
-const char *kernelNames[] = {"compute_tf32gemm_async_copy", "compute_tf32gemm", "simple_wmma_tf32gemm"};
+const char *kernelNames[] = {"tf32mma_shmem_gemm_async_copy", "tf32mma_shmem_gemm", "simple_tf32mma_gemm"};
 
 using namespace nvcuda;
 
@@ -579,7 +585,7 @@ compute_tf32gemm_async_copy(const float *A, const float *B, const float *C, floa
 #endif
 }
 
-// Performs an MxNxK tf32 GEMM (C=alpha*A*B + beta*C) assuming:
+// Performs an MxNxK tf32 GEMM (D = alpha*A*B + beta*C) assuming:
 //  1) Matrices are packed in memory.
 //  2) M, N and K are multiples of 16, 16 and 8 respectively.
 //  3) A is row major, B is column major matrix.
@@ -587,14 +593,9 @@ compute_tf32gemm_async_copy(const float *A, const float *B, const float *C, floa
 //       demonstration purposes only to show the CUDA WMMA API use without relying on
 //       availability of the shared memory.
 __global__ void
-simple_wmma_tf32gemm(float *a, float *b, float *c, float *d, int m_ld, int n_ld, int k_ld, float alpha, float beta)
+simple_wmma_tf32gemm(float *a, float *b, float *c, float *d, int m, int n, int k, float alpha, float beta)
 {
 #if __CUDA_ARCH__ >= 800
-    // Leading dimensions. Packed with no transpositions.
-    int lda = k_ld;
-    int ldb = k_ld;
-    int ldc = n_ld;
-
     // Tile using a 2D grid
     int warpM = (blockIdx.x * blockDim.x + threadIdx.x) / warpSize;
     int warpN = (blockIdx.y * blockDim.y + threadIdx.y);
@@ -605,10 +606,11 @@ simple_wmma_tf32gemm(float *a, float *b, float *c, float *d, int m_ld, int n_ld,
     wmma::fragment<wmma::accumulator, M, N, K, float>                               acc_frag;
     wmma::fragment<wmma::accumulator, M, N, K, float>                               c_frag;
 
+    // zero-init the acc fragment
     wmma::fill_fragment(acc_frag, 0.0f);
 
     // Loop over k
-    for (int i = 0; i < k_ld; i += K) {
+    for (int i = 0; i < k; i += K) {
         int aCol = i;
         int aRow = warpM * M;
 
@@ -618,10 +620,10 @@ simple_wmma_tf32gemm(float *a, float *b, float *c, float *d, int m_ld, int n_ld,
         int bRow = i;
 
         // Bounds checking
-        if (aRow < m_ld && aCol < k_ld && bRow < k_ld && bCol < n_ld) {
+        if (aRow < m && aCol < k && bRow < k && bCol < n) {
             // Load the inputs
-            wmma::load_matrix_sync(a_frag, a + aCol + aRow * lda, lda);
-            wmma::load_matrix_sync(b_frag, b + bRow + bCol * ldb, ldb);
+            wmma::load_matrix_sync(a_frag, a + aRow * k + aCol, k);
+            wmma::load_matrix_sync(b_frag, b + bCol * k + bRow, k);
 
 #pragma unroll
             for (int t = 0; t < a_frag.num_elements; t++) {
@@ -641,15 +643,15 @@ simple_wmma_tf32gemm(float *a, float *b, float *c, float *d, int m_ld, int n_ld,
     int cCol = warpN * N;
     int cRow = warpM * M;
 
-    if (cRow < m_ld && cCol < n_ld) {
-        wmma::load_matrix_sync(c_frag, c + cCol + cRow * ldc, ldc, wmma::mem_row_major);
+    if (cRow < m && cCol < n) {
+        wmma::load_matrix_sync(c_frag, c + cRow * n + cCol, n, C_LAYOUT);
 
         for (int i = 0; i < c_frag.num_elements; i++) {
             c_frag.x[i] = alpha * acc_frag.x[i] + beta * c_frag.x[i];
         }
 
         // Store the output
-        wmma::store_matrix_sync(d + cCol + cRow * ldc, c_frag, ldc, wmma::mem_row_major);
+        wmma::store_matrix_sync(d + cRow * n + cCol, c_frag, n, C_LAYOUT);
     }
 #endif
 }
@@ -728,6 +730,8 @@ int main(int argc, char **argv)
     assert(((unsigned long long)B) % 128 == 0);
     assert(((unsigned long long)C) % 128 == 0);
     assert(((unsigned long long)D) % 128 == 0);
+    assert(BLOCK_ROW_WARPS * BLOCK_COL_WARPS == WARPS_PER_BLOCK);
+    assert(M_TILES >= 1 && N_TILES >= 4 && K_TILES >= 8);
 
     init_host_matrices(A_h, B_h, C_h);
 
@@ -818,6 +822,12 @@ int main(int argc, char **argv)
     checkCudaErrors(cudaEventRecord(stop));
     checkCudaErrors(cudaEventSynchronize(stop));
 
+    // Timing to calculate TFLOPS
+    float milliseconds = 0;
+    checkCudaErrors(cudaEventElapsedTime(&milliseconds, start, stop));
+    printf("Time: %f ms\n", milliseconds);
+    printf("TFLOPS (tf32): %.4f\n", (((double)M_GLOBAL * N_GLOBAL * K_GLOBAL * 2) / (milliseconds / 1000.)) / 1e12);
+
 #if CPU_DEBUG
     printf("Verifying correctness of the computations...\n");
 
@@ -825,21 +835,20 @@ int main(int argc, char **argv)
 
     matMultiplyOnHost(A_h, B_h, result_host, alpha, beta, M_GLOBAL, K_GLOBAL, K_GLOBAL, N_GLOBAL, M_GLOBAL, N_GLOBAL);
 
-    for (int i = 0; i < N_GLOBAL * M_GLOBAL; i++) {
-        if (fabs(result_hD[i] - result_host[i]) > 0.1f) {
-            printf("mismatch i=%d result_hD=%f result_host=%f\n", i, result_hD[i], result_host[i]);
+    auto passed = true;
+    for (int i = 0; i < M_GLOBAL; i++) {
+        for (int j = 0; j < N_GLOBAL; j++) {
+            auto idx = i * N_GLOBAL + j;
+            if (fabs(result_hD[idx] - result_host[idx]) > 0.1f) {
+                printf("mismatch (i=%d, j=%d) result_hD=%f result_host=%f\n", i, j, result_hD[idx], result_host[idx]);
+                passed = false;
+            }   
         }
     }
+    printf("Verification %s\n", passed ? "PASSED" : "FAILED");
     free(result_hD);
     free(result_host);
 #endif
-
-    float milliseconds = 0;
-
-    checkCudaErrors(cudaEventElapsedTime(&milliseconds, start, stop));
-
-    printf("Time: %f ms\n", milliseconds);
-    printf("TFLOPS: %.2f\n", (((double)M_GLOBAL * N_GLOBAL * K_GLOBAL * 2) / (milliseconds / 1000.)) / 1e12);
 
     free(A_h);
     free(B_h);
