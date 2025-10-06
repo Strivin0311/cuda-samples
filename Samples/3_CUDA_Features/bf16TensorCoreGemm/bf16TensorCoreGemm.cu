@@ -72,14 +72,15 @@
 
 #ifndef CPU_DEBUG
 // Set this to 1 to verify the correctness of the GPU-computed matrix.
+// but it is really slow to check
 #define CPU_DEBUG 0
 #endif
 
 #ifndef SHARED_MEMORY_LIMIT_64K
-// Set this to 0 to use more than 64 Kb of shared memory to cache data, to
-// improve the performance of the computations on GPU.
-// Note that you need a GPU that can have more than 64 Kb of shared memory
-// per multiprocessor.
+// Set this to 0 to use more than 64 Kb of shared memory to cache data, 
+// to improve the performance of the computations on GPU.
+// Note that you need a GPU that can have more than 64 Kb of shared memory per multiprocessor,
+// e.g. for H100, there's 228KB of shared memory per multiprocessor.
 #define SHARED_MEMORY_LIMIT_64K 0
 #endif
 
@@ -95,9 +96,15 @@
 
 // GEMM configuration.
 
-#define M_TILES 512
-#define N_TILES 512
+#if CPU_DEBUG
+#define M_TILES 4
+#define N_TILES 4
+#define K_TILES 2
+#else
+#define M_TILES 1024
+#define N_TILES 1024
 #define K_TILES 512
+#endif
 
 #define M_GLOBAL (M * M_TILES)
 #define N_GLOBAL (N * N_TILES)
@@ -575,7 +582,7 @@ __global__ void compute_bf16gemm_async_copy(const __nv_bfloat16 *A,
 #endif
 }
 
-// Performs an MxNxK bf16 GEMM (C=alpha*A*B + beta*C) assuming:
+// Performs an MxNxK bf16 GEMM (D = alpha*A*B + beta*C) assuming:
 //  1) Matrices are packed in memory.
 //  2) M, N and K are multiples of 16, 16 and 16 respectively.
 //  3) A is row major, B is column major matrix.
@@ -586,62 +593,64 @@ __global__ void simple_wmma_bf16gemm(__nv_bfloat16 *a,
                                      __nv_bfloat16 *b,
                                      float         *c,
                                      float         *d,
-                                     int            m_ld,
-                                     int            n_ld,
-                                     int            k_ld,
+                                     int            m,
+                                     int            n,
+                                     int            k,
                                      float          alpha,
                                      float          beta)
 {
 #if __CUDA_ARCH__ >= 800
-    // Leading dimensions. Packed with no transpositions.
-    int lda = k_ld;
-    int ldb = k_ld;
-    int ldc = n_ld;
-
-    // Tile using a 2D grid
+    // Tile C matrix using a 2D grid
+    // i.e. this thread belong to the warp, handling the tile of 
+    // C[warpM*M, (warpM+1)*M][warpN*N, (warpN+1)*N]
     int warpM = (blockIdx.x * blockDim.x + threadIdx.x) / warpSize;
     int warpN = (blockIdx.y * blockDim.y + threadIdx.y);
 
     // Declare the fragments
     wmma::fragment<wmma::matrix_a, M, N, K, __nv_bfloat16, wmma::row_major> a_frag;
     wmma::fragment<wmma::matrix_b, M, N, K, __nv_bfloat16, wmma::col_major> b_frag;
-    wmma::fragment<wmma::accumulator, M, N, K, float>                       acc_frag;
     wmma::fragment<wmma::accumulator, M, N, K, float>                       c_frag;
-
+    wmma::fragment<wmma::accumulator, M, N, K, float>                       acc_frag;
+    
+    // zero-init the acc fragment
     wmma::fill_fragment(acc_frag, 0.0f);
 
-    // Loop over k
-    for (int i = 0; i < k_ld; i += K) {
-        int aCol = i;
-        int aRow = warpM * M;
-
-        int bCol = i;
-        int bRow = warpN * N;
+    // Loop over leading dimension k with the step size of K
+    int aRow = warpM * M, bCol = warpN * N;
+    for (int tileK = 0; tileK < k; tileK += K) {
+        int aCol = tileK, bRow = tileK;
 
         // Bounds checking
-        if (aRow < m_ld && aCol < k_ld && bRow < k_ld && bCol < n_ld) {
-            // Load the inputs
-            wmma::load_matrix_sync(a_frag, a + aCol + aRow * lda, lda);
-            wmma::load_matrix_sync(b_frag, b + bRow + bCol * ldb, ldb);
+        // where a.shape = (m, k), b.shape = (k, n)
+        if (aRow < m && aCol < k && bRow < k && bCol < n) {
+            // Load the input tiles of:
+            // a[aRow:aRow+M, aCol:aCol+K], and
+            // b[bRow:bRow+K, bCol:bCol+N]
+            wmma::load_matrix_sync(a_frag, a + aRow * k + aCol, k); // row-major, where the leading dimension is k
+            wmma::load_matrix_sync(b_frag, b + bCol * k + bRow, k); // col-major, where the leading dimension is k
 
             // Perform the matrix multiplication
+            // acc[aRow:aRow+M, aCol:aCol+K] += a[aRow:aRow+M, aCol:aCol+K] * b[bRow:bRow+K, bCol:bCol+N]
             wmma::mma_sync(acc_frag, a_frag, b_frag, acc_frag);
         }
     }
 
-    // Load in the current value of c, scale it by beta, and add this our result scaled by alpha
-    int cCol = warpN * N;
-    int cRow = warpM * M;
+    // Load in the C tile of c[cRow:cRow+M, cCol:cCol+N],
+    // scale it by beta, and add it to our acc scaled by alpha
+    // where c.shape = (m, n)
+    int cRow = warpM * M, cCol = warpN * N;
+    if (cRow < m && cCol < n) {
+        // Load the C tile of c[cRow:cRow+M, cCol:cCol+N]
+        wmma::load_matrix_sync(c_frag, c + cRow * n + cCol, n, C_LAYOUT); // row-major, where the leading dimension is n
 
-    if (cRow < m_ld && cCol < n_ld) {
-        wmma::load_matrix_sync(c_frag, c + cCol + cRow * ldc, ldc, wmma::mem_row_major);
-
+        // Apply the scaling and addition of
+        // c[cRow:cRow+M, cCol:cCol+N] = alpha * acc[cRow:cRow+M, cCol:cCol+N] + beta * c[cRow:cRow+M, cCol:cCol+N]
         for (int i = 0; i < c_frag.num_elements; i++) {
             c_frag.x[i] = alpha * acc_frag.x[i] + beta * c_frag.x[i];
         }
 
-        // Store the output
-        wmma::store_matrix_sync(d + cCol + cRow * ldc, c_frag, ldc, wmma::mem_row_major);
+        // Store the output into D tile of d[cRow:cRow+M, cCol:cCol+N],
+        wmma::store_matrix_sync(d + cRow * n + cCol, c_frag, n, C_LAYOUT); // row-major, where the leading dimension is n
     }
 #endif
 }
@@ -706,6 +715,11 @@ int main(int argc, char **argv)
     result_host = (float *)malloc(sizeof(float) * M_GLOBAL * N_GLOBAL);
 #endif
 
+    // GEMM: D = alpha * A * B + beta * C
+    // where A.shape=(m, k), B.shape=(k, n), C.shape=(m, n), D.shape=(m, n)
+    // and A is row-major, B is column-major, thus the leading dimensions for A and B are both K
+    const float alpha = 1.1f;
+    const float beta  = 1.2f;
     __nv_bfloat16 *A = NULL;
     __nv_bfloat16 *B = NULL;
     float         *C = NULL;
@@ -733,16 +747,12 @@ int main(int argc, char **argv)
     enum {
         // Compute the right amount of shared memory to request.
         // We need shared memory to hold per-CTA C and D matrix tiles, and to cache per-CTA chunks
-        // of the A and B matrices. Therefore, the right amount to request is the maximum of those
-        // two numbers.
+        // of the A and B matrices. Therefore, the right amount to request is the maximum of those two numbers.
         SHMEM_SZ = MAX(sizeof(__nv_bfloat16) * (BLOCK_COL_TILES * M) * (CHUNK_K * K + SKEW_BF16) * 2,
                        M * (BLOCK_ROW_WARPS * WARP_ROW_TILES) * N * (BLOCK_COL_WARPS * WARP_COL_TILES) * sizeof(float))
     };
 
     printf("Required shared memory size: %lu Kb\n", SHMEM_SZ / 1024UL);
-
-    const float alpha = 1.1f;
-    const float beta  = 1.2f;
 
     cudaEvent_t start, stop;
 
@@ -797,8 +807,11 @@ int main(int argc, char **argv)
         blockDim.x = 128;
         blockDim.y = 4;
 
-        gridDim.x = (M_GLOBAL + (M * blockDim.x / 32 - 1)) / (M * blockDim.x / 32);
-        gridDim.y = (N_GLOBAL + N * blockDim.y - 1) / (N * blockDim.y);
+        auto M_CHUNK_SIZE = M * blockDim.x / 32;
+        auto N_CHUNK_SIZE = N * blockDim.y;
+
+        gridDim.x = (M_GLOBAL + M_CHUNK_SIZE - 1) / M_CHUNK_SIZE;
+        gridDim.y = (N_GLOBAL + N_CHUNK_SIZE - 1) / N_CHUNK_SIZE;
 
         printf("Computing... using simple_wmma_gemm kernel\n");
         simple_wmma_bf16gemm<<<gridDim, blockDim>>>(A, B, C, D, M_GLOBAL, N_GLOBAL, K_GLOBAL, alpha, beta);
@@ -809,6 +822,12 @@ int main(int argc, char **argv)
 
     checkCudaErrors(cudaEventRecord(stop));
     checkCudaErrors(cudaEventSynchronize(stop));
+
+    // Timing to calculate TFLOPS
+    float milliseconds = 0;
+    checkCudaErrors(cudaEventElapsedTime(&milliseconds, start, stop));
+    printf("Time: %f ms\n", milliseconds);
+    printf("TFLOPS: %.4f\n", (((double)M_GLOBAL * N_GLOBAL * K_GLOBAL * 2) / (milliseconds / 1000.)) / 1e12);
 
 #if CPU_DEBUG
     printf("Verifying correctness of the computations...\n");
@@ -825,13 +844,6 @@ int main(int argc, char **argv)
     free(result_hD);
     free(result_host);
 #endif
-
-    float milliseconds = 0;
-
-    checkCudaErrors(cudaEventElapsedTime(&milliseconds, start, stop));
-
-    printf("Time: %f ms\n", milliseconds);
-    printf("TFLOPS: %.2f\n", (((double)M_GLOBAL * N_GLOBAL * K_GLOBAL * 2) / (milliseconds / 1000.)) / 1e12);
 
     free(A_h);
     free(B_h);

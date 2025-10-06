@@ -51,8 +51,7 @@ fi
 
 # run
 
-# CMD="./$BUILD_ROOT/$TARGET" # only test the correctness of one kernel, default kernel7
-CMD="./$BUILD_ROOT/$TARGET --shmoo" # benchmark all kernels with the array size goes
+CMD=./$BUILD_ROOT/$TARGET
 
 if [ "$SKIP_RUN" = false ]; then
     echo "$SEP"

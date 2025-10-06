@@ -210,8 +210,8 @@ void sortDevicePointerExample(int N) {
     std::mt19937 g(rd());
     std::shuffle(h_data.begin(), h_data.end(), g);     // shuffled [0, 1, 2, ..., N-1]
 
-    std::cout << "Original Host Data (first 10): ";
-    for (int i = 0; i < std::min(N, 10); ++i) {
+    std::cout << "Original Host Data: ";
+    for (int i = 0; i < N; ++i) {
         std::cout << h_data[i] << " ";
     }
     std::cout << std::endl;
@@ -235,8 +235,8 @@ void sortDevicePointerExample(int N) {
     thrust::host_vector<int> h_sorted_data(N);
     checkCudaErrors(cudaMemcpy(h_sorted_data.data(), d_raw_ptr, N * sizeof(int), cudaMemcpyDeviceToHost));
 
-    std::cout << "Sorted Host Data (first 10): ";
-    for (int i = 0; i < std::min(N, 10); ++i) {
+    std::cout << "Sorted Host Data: ";
+    for (int i = 0; i < N; ++i) {
         std::cout << h_sorted_data[i] << " ";
     }
     std::cout << std::endl;

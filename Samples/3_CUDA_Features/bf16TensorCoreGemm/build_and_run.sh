@@ -3,10 +3,10 @@
 SEP="--------------------------------------------------------------------"
 
 BUILD_ROOT=build
-TARGET=scan
+TARGET=bf16TensorCoreGemm
 
 # default not skip any step
-SKIP_BUILD=false
+SKIP_BUILD=true
 SKIP_RUN=false
 SKIP_PROFILE=true
 
@@ -39,7 +39,7 @@ if [ "$SKIP_BUILD" = false ]; then
 
     rm -rf $BUILD_ROOT && mkdir -p $BUILD_ROOT && cd $BUILD_ROOT || exit
 
-    cmake -DCMAKE_CUDA_ARCHITECTURES="75;80;86;89;90;100" ..
+    cmake -DCMAKE_CUDA_ARCHITECTURES="75;80;86;89;90;100" -DCPU_DEBUG=OFF ..
     make -j8 || exit
 
     cd ..
@@ -51,7 +51,7 @@ fi
 
 # run
 
-CMD=./$BUILD_ROOT/$TARGET
+CMD="./$BUILD_ROOT/$TARGET --kernel=2"
 
 if [ "$SKIP_RUN" = false ]; then
     echo "$SEP"

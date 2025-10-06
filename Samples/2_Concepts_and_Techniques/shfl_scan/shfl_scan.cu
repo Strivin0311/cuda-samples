@@ -59,7 +59,6 @@ __global__ void shfl_scan_test(int *data, int width, int *partial_sums = NULL)
     int                   lane_id = id % warpSize;
     // determine a warp_id within a block
     int warp_id = threadIdx.x / warpSize;
-    int lane_id = threadIdx.x % warpSize;
 
     // Below is the basic structure of using a shfl instruction for a scan.
     // Record "value" as a variable - we accumulate it along the way
