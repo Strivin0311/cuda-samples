@@ -38,3 +38,7 @@ target_compile_options(dmmaTensorCoreGemm PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--e
 target_compile_features(dmmaTensorCoreGemm PRIVATE cxx_std_17 cuda_std_17)
 
 set_target_properties(dmmaTensorCoreGemm PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+
+# whether to use pthreads, otherwise use OpenMP, default is OFF
+option(CPU_DEBUG "Enable result verification with the CPU orcale" OFF)
+target_compile_definitions(dmmaTensorCoreGemm PRIVATE $<$<BOOL:${CPU_DEBUG}>:CPU_DEBUG>)
