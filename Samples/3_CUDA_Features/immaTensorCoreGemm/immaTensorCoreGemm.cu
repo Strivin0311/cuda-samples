@@ -97,15 +97,17 @@
 #define N 16
 #define K 16
 
-#define WMMA_M 16
-#define WMMA_N 16
-#define WMMA_K 16
-
 // GEMM configuration.
 
-#define M_TILES 256
-#define N_TILES 256
-#define K_TILES 256
+#if CPU_DEBUG
+#define M_TILES 16
+#define N_TILES 16
+#define K_TILES 8
+#else
+#define M_TILES 512
+#define N_TILES 512
+#define K_TILES 512
+#endif
 
 #define M_GLOBAL (M * M_TILES)
 #define N_GLOBAL (N * N_TILES)
@@ -176,6 +178,12 @@
             abort();                                                                          \
         }                                                                                     \
     } while (0)
+
+enum kernels {
+    shmem_uint8_wmma_gemm            = 0, // uint8 WarpMMA with shmem.
+    simple_uint8_wmma_gemm           = 1  // uint8 WarpMMA w/o shmem.
+};
+const char *kernelNames[] = {"shmem_uint8_wmma_gemm", "simple_uint8_wmma_gemm"};
 
 using namespace nvcuda;
 
@@ -381,7 +389,7 @@ __global__ void compute_gemm_imma(const uint8_t *A, const uint8_t *B, const int 
     }
 }
 
-// Performs an MxNxK GEMM (C=alpha*A*B + beta*C) assuming:
+// Performs an MxNxK GEMM (D = alpha*A*B + beta*C) assuming:
 //  1) Matrices are packed in memory.
 //  2) M, N and K are multiples of 16.
 //  3) Neither A nor B are transposed.
@@ -393,62 +401,62 @@ __global__ void simple_wmma_gemm_imma(const uint8_t *a,
                                       const uint8_t *b,
                                       const int     *c,
                                       int           *d,
-                                      int            m_ld,
-                                      int            n_ld,
-                                      int            k_ld,
+                                      int            m,
+                                      int            n,
+                                      int            k,
                                       int            alpha,
                                       int            beta)
 {
     // Leading dimensions. Packed with no transpositions.
-    int lda = m_ld;
-    int ldb = k_ld;
-    int ldc = n_ld;
+    int lda = m;
+    int ldb = k;
+    int ldc = n;
 
     // Tile using a 2D grid
     int warpM = (blockIdx.x * blockDim.x + threadIdx.x) / warpSize;
     int warpN = (blockIdx.y * blockDim.y + threadIdx.y);
 
     // Declare the fragments
-    wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, uint8_t, wmma::row_major> a_frag;
-    wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, uint8_t, wmma::col_major> b_frag;
-    wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, int>                   acc_frag;
-    wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, int>                   c_frag;
+    wmma::fragment<wmma::matrix_a, M, N, K, uint8_t, wmma::row_major> a_frag;
+    wmma::fragment<wmma::matrix_b, M, N, K, uint8_t, wmma::col_major> b_frag;
+    wmma::fragment<wmma::accumulator, M, N, K, int>                   acc_frag;
+    wmma::fragment<wmma::accumulator, M, N, K, int>                   c_frag;
 
+    // zero-init the acc fragment
     wmma::fill_fragment(acc_frag, 0.0f);
 
     // Loop over k
-    for (int i = 0; i < k_ld; i += WMMA_K) {
+    for (int i = 0; i < k; i += K) {
         int aCol = i;
-        int aRow = warpM * WMMA_M;
+        int aRow = warpM * M;
 
         int bCol = i;
-        int bRow = warpN * WMMA_N;
+        int bRow = warpN * N;
 
         // Bounds checking
-        if (aRow < m_ld && aCol < k_ld && bRow < k_ld && bCol < n_ld) {
+        if (aRow < m && aCol < k && bRow < k && bCol < n) {
             // Load the inputs
-            wmma::load_matrix_sync(a_frag, a + aCol + aRow * lda, lda);
-            wmma::load_matrix_sync(b_frag, b + bCol + bRow * ldb, ldb);
+            wmma::load_matrix_sync(a_frag, a + aRow * lda + aCol, lda);
+            wmma::load_matrix_sync(b_frag, b + bRow * ldb + bCol, ldb);
 
             // Perform the matrix multiplication
             wmma::mma_sync(acc_frag, a_frag, b_frag, acc_frag);
         }
     }
 
-    // Load in the current value of c, scale it by beta, and add this our result
-    // scaled by alpha
-    int cCol = warpN * WMMA_N;
-    int cRow = warpM * WMMA_M;
-
-    if (cRow < m_ld && cCol < n_ld) {
-        wmma::load_matrix_sync(c_frag, c + cCol + cRow * ldc, ldc, wmma::mem_row_major);
+    // Load in the current value of c, scale it by beta, 
+    // and add this our result scaled by alpha
+    int cCol = warpN * N;
+    int cRow = warpM * M;
+    if (cRow < m && cCol < n) {
+        wmma::load_matrix_sync(c_frag, c + cRow * ldc + cCol, ldc, C_LAYOUT);
 
         for (int i = 0; i < c_frag.num_elements; i++) {
             c_frag.x[i] = alpha * acc_frag.x[i] + beta * c_frag.x[i];
         }
 
         // Store the output
-        wmma::store_matrix_sync(d + cCol + cRow * ldc, c_frag, ldc, wmma::mem_row_major);
+        wmma::store_matrix_sync(d + cRow * ldc + cCol, c_frag, ldc, C_LAYOUT);
     }
 }
 
@@ -527,6 +535,8 @@ int main(int argc, char **argv)
     assert(((unsigned long long)B) % 128 == 0);
     assert(((unsigned long long)C) % 128 == 0);
     assert(((unsigned long long)D) % 128 == 0);
+    assert(BLOCK_ROW_WARPS * BLOCK_COL_WARPS == WARPS_PER_BLOCK);
+    assert(M_TILES >= 1 && N_TILES >= 8 && K_TILES >= 8);
 
     init_host_matrices(A_h, B_h, C_h);
 
@@ -564,9 +574,23 @@ int main(int argc, char **argv)
     checkCudaErrors(cudaEventCreate(&stop));
     checkCudaErrors(cudaEventRecord(start));
 
+    // kernel to run - default (shmem_uint8_wmma_gemm == 0)
+    kernels selected_kernel = shmem_uint8_wmma_gemm;
+
+    if (checkCmdLineFlag(argc, (const char **)argv, "kernel")) {
+        int kernel_number = getCmdLineArgumentInt(argc, (const char **)argv, "kernel");
+        if (kernel_number < 2) {
+            selected_kernel = (kernels)kernel_number;
+        }
+        else {
+            printf("Error: kernel number should be between 0 to 1, you have entered %d\n", kernel_number);
+            exit(EXIT_FAILURE);
+        }
+    }
+
     // If enough shared memory available on the GPU use high performant kernel
-    if (deviceProp.sharedMemPerMultiprocessor >= SHMEM_SZ) {
-        printf("Computing... using high performance kernel compute_gemm_imma \n");
+    if ((deviceProp.sharedMemPerMultiprocessor >= SHMEM_SZ) && (selected_kernel != simple_uint8_wmma_gemm)) {
+        printf("Computing using high performance kernel = %d - %s\n", selected_kernel, kernelNames[selected_kernel]);
 
         checkCudaErrors(cudaFuncSetAttribute(compute_gemm_imma, cudaFuncAttributeMaxDynamicSharedMemorySize, SHMEM_SZ));
         checkKernelErrors((compute_gemm_imma<<<deviceProp.multiProcessorCount, THREADS_PER_BLOCK, SHMEM_SZ>>>(
@@ -584,8 +608,11 @@ int main(int argc, char **argv)
         blockDim.x = 128;
         blockDim.y = 4;
 
-        gridDim.x = (M_GLOBAL + (WMMA_M * blockDim.x / 32 - 1)) / (WMMA_M * blockDim.x / 32);
-        gridDim.y = (N_GLOBAL + WMMA_N * blockDim.y - 1) / (WMMA_N * blockDim.y);
+        auto block_num_tiles_m = M * blockDim.x / WARP_SIZE;
+        auto block_num_tiles_n = N * blockDim.y;
+
+        gridDim.x = (M_GLOBAL + block_num_tiles_m - 1) / block_num_tiles_m;
+        gridDim.y = (N_GLOBAL + block_num_tiles_n - 1) / block_num_tiles_n;
 
         printf("Computing... using simple_wmma_gemm_imma kernel\n");
         simple_wmma_gemm_imma<<<gridDim, blockDim>>>(A, B, C, D, M_GLOBAL, N_GLOBAL, K_GLOBAL, alpha, beta);
@@ -597,6 +624,12 @@ int main(int argc, char **argv)
     checkCudaErrors(cudaEventRecord(stop));
     checkCudaErrors(cudaEventSynchronize(stop));
 
+    // Timing to calculate TOPS
+    float milliseconds = 0;
+    checkCudaErrors(cudaEventElapsedTime(&milliseconds, start, stop));
+    printf("Time: %f ms\n", milliseconds);
+    printf("TOPS (uint8): %.4f\n", (((double)M_GLOBAL * N_GLOBAL * K_GLOBAL * 2) / (milliseconds / 1000.)) / 1e12);
+
 #if CPU_DEBUG
     printf("Verifying correctness of the computations...\n");
 
@@ -604,21 +637,20 @@ int main(int argc, char **argv)
 
     matMultiplyOnHost(A_h, B_h, result_host, alpha, beta, M_GLOBAL, K_GLOBAL, K_GLOBAL, N_GLOBAL, M_GLOBAL, N_GLOBAL);
 
-    for (int i = 0; i < N_GLOBAL * M_GLOBAL; i++) {
-        if (abs(result_hD[i] - result_host[i]) > 0) {
-            printf("mismatch i=%d result_hD=%d result_host=%d\n", i, result_hD[i], result_host[i]);
+    auto passed = true;
+    for (int i = 0; i < M_GLOBAL; i++) {
+        for (int j = 0; j < N_GLOBAL; j++) {
+            auto idx = i * N_GLOBAL + j;
+            if (fabs(result_hD[idx] - result_host[idx]) > 0.1f) {
+                printf("mismatch (i=%d, j=%d) result_hD=%d result_host=%d\n", i, j, result_hD[idx], result_host[idx]);
+                passed = false;
+            }   
         }
     }
+    printf("Verification %s\n", passed ? "PASSED" : "FAILED");
     free(result_host);
     free(result_hD);
 #endif
-
-    float milliseconds = 0;
-
-    checkCudaErrors(cudaEventElapsedTime(&milliseconds, start, stop));
-
-    printf("Time: %f ms\n", milliseconds);
-    printf("TOPS: %.2f\n", (((double)M_GLOBAL * N_GLOBAL * K_GLOBAL * 2) / (milliseconds / 1000.)) / 1e12);
 
     free(A_h);
     free(B_h);
