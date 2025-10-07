@@ -217,8 +217,7 @@ __global__ void compute_gemm(const half *A, const half *B, const float *C, float
     float *shmem_warp_tile_ptr =
         (float *)&shmem[0][0] + (warpId / 2) * SHMEM_STRIDE * K * 2 + (warpId % 2) * SHMEM_OFFSET;
 
-    // This pointer is used to stream the C and D matrices block-wide tile to and
-    // from shared memory.
+    // This pointer is used to stream the C and D matrices block-wide tile to and from shared memory.
     float *shmem_warp_stream_ptr = (float *)&shmem[0][0] + warpId * SHMEM_STRIDE * K;
 
     // Adjust the beta scaler, as it'll be multiplied by alpha at the end of
@@ -389,13 +388,12 @@ __global__ void compute_gemm(const half *A, const half *B, const float *C, float
 // Performs an MxNxK GEMM (D = alpha*A*B + beta*C) assuming:
 //  1) Matrices are packed in memory.
 //  2) M, N and K are multiples of 16.
-//  3) Neither A nor B are transposed.
-// Note: This is a less performant version of the compute_gemm kernel. It is
-// designed for
-//       demonstration purposes only to show the CUDA WMMA API use without
-//       relying on availability of the shared memory.
-__global__ void
-simple_wmma_gemm(half *a, half *b, float *c, float *d, int m, int n, int k, float alpha, float beta)
+//  3) A is row major, B is column major matrix.
+// Note: This is a less performant version of the compute_gemm kernel. 
+//      It is designed for demonstration purposes 
+//      only to show the CUDA WMMA API use without
+//      relying on availability of the shared memory.
+__global__ void simple_wmma_gemm(half *a, half *b, float *c, float *d, int m, int n, int k, float alpha, float beta)
 {
     // Tile using a 2D grid
     int warpM = (blockIdx.x * blockDim.x + threadIdx.x) / warpSize;
@@ -411,11 +409,9 @@ simple_wmma_gemm(half *a, half *b, float *c, float *d, int m, int n, int k, floa
     wmma::fill_fragment(acc_frag, 0.0f);
 
     // Loop over k
+    int aRow = warpM * M, bCol = warpN * N;
     for (int i = 0; i < k; i += K) {
-        int aCol = i;
-        int aRow = warpM * M;
-        int bCol = warpN * N;
-        int bRow = i;
+        int aCol = i, bRow = i;
 
         // Bounds checking
         if (aRow < m && aCol < k && bRow < k && bCol < n) {
@@ -428,8 +424,8 @@ simple_wmma_gemm(half *a, half *b, float *c, float *d, int m, int n, int k, floa
         }
     }
 
-    // Load in the current value of c, scale it by beta, and add this our result
-    // scaled by alpha
+    // Load in the current value of c, scale it by beta, 
+    // and add this our result scaled by alpha
     int cCol = warpN * N;
     int cRow = warpM * M;
 

@@ -392,8 +392,7 @@ __global__ void compute_dgemm(const double *A, const double *B, const double *C,
 #endif
 }
 
-__global__ void
-compute_dgemm_async_copy(const double *A, const double *B, const double *C, double *D, double alpha, double beta)
+__global__ void compute_dgemm_async_copy(const double *A, const double *B, const double *C, double *D, double alpha, double beta)
 {
 #if __CUDA_ARCH__ >= 800
     extern __shared__ double shmem[][CHUNK_K * K + SKEW_DOUBLE];
@@ -582,8 +581,7 @@ compute_dgemm_async_copy(const double *A, const double *B, const double *C, doub
 #endif
 }
 
-__global__ void
-compute_dgemm_cg_async_copy(const double *A, const double *B, const double *C, double *D, double alpha, double beta)
+__global__ void compute_dgemm_cg_async_copy(const double *A, const double *B, const double *C, double *D, double alpha, double beta)
 {
 #if __CUDA_ARCH__ >= 800
     extern __shared__ double shmem[][CHUNK_K * K + SKEW_DOUBLE];
@@ -778,8 +776,7 @@ compute_dgemm_cg_async_copy(const double *A, const double *B, const double *C, d
 // Note: This is a less performant version of the compute_dgemm kernel. It is designed for
 //       demonstration purposes only to show the CUDA WMMA API use without relying on
 //       availability of the shared memory.
-__global__ void
-simple_wmma_gemm(double *a, double *b, double *c, double *d, int m, int n, int k, double alpha, double beta)
+__global__ void simple_wmma_gemm(double *a, double *b, double *c, double *d, int m, int n, int k, double alpha, double beta)
 {
 #if __CUDA_ARCH__ >= 800
     // Tile using a 2D grid
