@@ -97,62 +97,50 @@ int main(int argc, char **argv)
 
     // get the range of priorities available
     // [ greatest_priority, lowest_priority ]
-    int priority_low;
-    int priority_hi;
+    int priority_low, priority_hi;
     checkCudaErrors(cudaDeviceGetStreamPriorityRange(&priority_low, &priority_hi));
 
     printf("CUDA stream priority range: LOW: %d to HIGH: %d\n", priority_low, priority_hi);
 
     // create streams with highest and lowest available priorities
-    cudaStream_t st_low;
-    cudaStream_t st_hi;
+    cudaStream_t st_low, st_hi;
     checkCudaErrors(cudaStreamCreateWithPriority(&st_low, cudaStreamNonBlocking, priority_low));
     checkCudaErrors(cudaStreamCreateWithPriority(&st_hi, cudaStreamNonBlocking, priority_hi));
 
-    size_t size;
-    size = TOTAL_SIZE;
+    size_t size = TOTAL_SIZE;
 
     // initialise host data
-    int *h_src_low;
-    int *h_src_hi;
+    int *h_src_low, *h_src_hi;
     ERR_EQ(h_src_low = (int *)malloc(size), NULL);
     ERR_EQ(h_src_hi = (int *)malloc(size), NULL);
     mem_init(h_src_low, size);
     mem_init(h_src_hi, size);
 
     // initialise device data
-    int *h_dst_low;
-    int *h_dst_hi;
+    int *h_dst_low, *h_dst_hi;
     ERR_EQ(h_dst_low = (int *)malloc(size), NULL);
     ERR_EQ(h_dst_hi = (int *)malloc(size), NULL);
     memset(h_dst_low, 0, size);
     memset(h_dst_hi, 0, size);
 
     // copy source data -> device
-    int *d_src_low;
-    int *d_src_hi;
+    int *d_src_low, *d_src_hi;
     checkCudaErrors(cudaMalloc(&d_src_low, size));
     checkCudaErrors(cudaMalloc(&d_src_hi, size));
     checkCudaErrors(cudaMemcpy(d_src_low, h_src_low, size, cudaMemcpyHostToDevice));
     checkCudaErrors(cudaMemcpy(d_src_hi, h_src_hi, size, cudaMemcpyHostToDevice));
 
     // allocate memory for memcopy destination
-    int *d_dst_low;
-    int *d_dst_hi;
+    int *d_dst_low, *d_dst_hi;
     checkCudaErrors(cudaMalloc(&d_dst_low, size));
     checkCudaErrors(cudaMalloc(&d_dst_hi, size));
 
     // create some events
-    cudaEvent_t ev_start_low;
-    cudaEvent_t ev_start_hi;
-    cudaEvent_t ev_end_low;
-    cudaEvent_t ev_end_hi;
+    cudaEvent_t ev_start_low, ev_start_hi, ev_end_low, ev_end_hi;
     checkCudaErrors(cudaEventCreate(&ev_start_low));
     checkCudaErrors(cudaEventCreate(&ev_start_hi));
     checkCudaErrors(cudaEventCreate(&ev_end_low));
     checkCudaErrors(cudaEventCreate(&ev_end_hi));
-
-    /* */
 
     // call pair of kernels repeatedly (with different priority streams)
     checkCudaErrors(cudaEventRecord(ev_start_low, st_low));
@@ -170,9 +158,6 @@ int main(int argc, char **argv)
     checkCudaErrors(cudaEventSynchronize(ev_end_low));
     checkCudaErrors(cudaEventSynchronize(ev_end_hi));
 
-    /* */
-
-    size = TOTAL_SIZE;
     checkCudaErrors(cudaMemcpy(h_dst_low, d_dst_low, size, cudaMemcpyDeviceToHost));
     checkCudaErrors(cudaMemcpy(h_dst_hi, d_dst_hi, size, cudaMemcpyDeviceToHost));
 
@@ -181,13 +166,12 @@ int main(int argc, char **argv)
     ERR_NE(memcmp(h_dst_hi, h_src_hi, size), 0);
 
     // check timings
-    float ms_low;
-    float ms_hi;
+    float ms_low, ms_hi;
     checkCudaErrors(cudaEventElapsedTime(&ms_low, ev_start_low, ev_end_low));
     checkCudaErrors(cudaEventElapsedTime(&ms_hi, ev_start_hi, ev_end_hi));
 
-    printf("elapsed time of kernels launched to LOW priority stream: %.3lf ms\n", ms_low);
-    printf("elapsed time of kernels launched to HI  priority stream: %.3lf ms\n", ms_hi);
+    printf("elapsed time of kernels launched to low priority stream: %.3lf ms\n", ms_low);
+    printf("elapsed time of kernels launched to high priority stream: %.3lf ms\n", ms_hi);
 
     exit(EXIT_SUCCESS);
 }
