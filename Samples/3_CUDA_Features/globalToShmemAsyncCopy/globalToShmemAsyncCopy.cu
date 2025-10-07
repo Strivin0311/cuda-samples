@@ -77,9 +77,12 @@ const char *kernelNames[] = {"AsyncCopyMultiStageLargeChunk",
                              "Naive",
                              "NaiveLargeChunk"};
 
-constexpr int blockSize = 16;
+constexpr int blockSize = 16; // why blockSize = 32 causes errors in `MatrixMulAsyncCopyMultiStageSharedState`
 
-// Multi Stage memcpy_async pipeline with large chunk copy
+// Multi-stage pipeline version
+constexpr size_t maxPipelineStages = 4;
+
+// Multi Stage memcpy_async pipeline with large chunk copy (float4)
 template <int BLOCK_SIZE>
 __global__ void MatrixMulAsyncCopyMultiStageLargeChunk(float *__restrict__ C,
                                                        const float *__restrict__ A,
@@ -87,11 +90,6 @@ __global__ void MatrixMulAsyncCopyMultiStageLargeChunk(float *__restrict__ C,
                                                        int wA,
                                                        int wB)
 {
-    // Requires BLOCK_SIZE % 4 == 0
-
-    // Multi-stage pipeline version
-    constexpr size_t maxPipelineStages = 4;
-
     // Declaration of the shared memory array As used to
     // store the sub-matrix of A for each stage
     __shared__ alignas(alignof(float4)) float As[maxPipelineStages][BLOCK_SIZE][BLOCK_SIZE];
@@ -119,15 +117,14 @@ __global__ void MatrixMulAsyncCopyMultiStageLargeChunk(float *__restrict__ C,
 
     const int  t4x    = threadIdx.x * 4;
     const auto shape4 = cuda::aligned_size_t<alignof(float4)>(sizeof(float4));
-
-    cuda::pipeline<cuda::thread_scope_thread> pipe = cuda::make_pipeline();
+    cuda::pipeline<cuda::thread_scope_thread> pipe = cuda::make_pipeline(); // thread-level scope
 
     // Loop over all the sub-matrices of A and B
     // required to compute the block sub-matrix
     for (int a = aBegin, b = bBegin, i = 0, aStage = aBegin, bStage = bBegin, iStage = 0; a <= aEnd;
          a += aStep, b += bStep, ++i) {
-        // Load the matrices from device memory to shared memory; each thread loads
-        // one element of each matrix
+        // Load the matrices from device memory to shared memory
+        // each thread loads four element of each matrix
         for (; aStage <= a + aStep * maxPipelineStages; aStage += aStep, bStage += bStep, ++iStage) {
             pipe.producer_acquire();
             if (aStage <= aEnd && t4x < BLOCK_SIZE) {
@@ -140,15 +137,15 @@ __global__ void MatrixMulAsyncCopyMultiStageLargeChunk(float *__restrict__ C,
         }
 
         pipe.consumer_wait();
+
         // Synchronize to make sure the matrices are loaded
         __syncthreads();
 
         // Rotating buffer
         const int j = i % maxPipelineStages;
 
-// Multiply the two matrices together;
-// each thread computes one element
-// of the block sub-matrix
+// Multiply the two matrices together
+// each thread computes one element of the block sub-matrix
 #pragma unroll
         for (int k = 0; k < BLOCK_SIZE; ++k) {
             Csub += As[j][threadIdx.y][k] * Bs[j][k][threadIdx.x];
@@ -156,11 +153,12 @@ __global__ void MatrixMulAsyncCopyMultiStageLargeChunk(float *__restrict__ C,
         pipe.consumer_release();
 
         // Don't have to synchronize because maxPipelineStages is greater than one
-        // therefore next iteration is loading to a different buffer.
+        // therefore next iteration is loading to a different buffer (i.e. the (i+1)th buffer)
+        // __syncthreads();
     }
 
     // Write the block sub-matrix to device memory;
-    // each thread writes four element
+    // each thread writes one element
     int c                                 = wB * BLOCK_SIZE * blockIdx.y + BLOCK_SIZE * blockIdx.x;
     C[c + wB * threadIdx.y + threadIdx.x] = Csub;
 }
@@ -173,14 +171,14 @@ __global__ void MatrixMulAsyncCopyLargeChunk(float *__restrict__ C,
                                              int wA,
                                              int wB)
 {
-    // Requires BLOCK_SIZE % 4 == 0
-
     // Declaration of the shared memory array As used to
     // store the sub-matrix of A
+    // aligned to float4 for vectorization load
     __shared__ alignas(alignof(float4)) float As[BLOCK_SIZE][BLOCK_SIZE];
 
     // Declaration of the shared memory array Bs used to
     // store the sub-matrix of B
+    // aligned to float4 for vectorization load
     __shared__ alignas(alignof(float4)) float Bs[BLOCK_SIZE][BLOCK_SIZE];
 
     // Index of the first sub-matrix of A processed by the block
@@ -202,20 +200,15 @@ __global__ void MatrixMulAsyncCopyLargeChunk(float *__restrict__ C,
     float Csub = 0.0;
 
     const int                                 t4x    = threadIdx.x * 4;
-    const auto                                shape4 = cuda::aligned_size_t<alignof(float4)>(sizeof(float4));
-    cuda::pipeline<cuda::thread_scope_thread> pipe   = cuda::make_pipeline();
+    const auto                                shape4 = cuda::aligned_size_t<alignof(float4)>(sizeof(float4)); // aligned to float4
+    cuda::pipeline<cuda::thread_scope_thread> pipe   = cuda::make_pipeline(); // thread-level scope
 
     // Loop over all the sub-matrices of A and B
     // required to compute the block sub-matrix
     for (int a = aBegin, b = bBegin; a <= aEnd; a += aStep, b += bStep) {
-        // Load the matrices from device memory to shared memory;
-        // a subset of threads loads a contiguous chunk of elements.
-
-        // Previously, per-thread:
-        // As[ty][tx] = A[a + wA * ty + tx];
-        // Bs[ty][tx] = B[b + wB * ty + tx];
-
-        // Now, one fourth of the threads load four elements of each matrix
+        // Load the matrices from device memory to shared memory
+        // one thread load four elements of each matrix
+        // thus only the 1/4 threads will load
         if (t4x < BLOCK_SIZE) {
             pipe.producer_acquire();
 
@@ -230,8 +223,7 @@ __global__ void MatrixMulAsyncCopyLargeChunk(float *__restrict__ C,
         __syncthreads();
 
 // Multiply the two matrices together;
-// each thread computes one element
-// of the block sub-matrix
+// each thread computes one element of the block sub-matrix
 #pragma unroll
         for (int k = 0; k < BLOCK_SIZE; ++k) {
             Csub += As[threadIdx.y][k] * Bs[k][threadIdx.x];
@@ -239,20 +231,24 @@ __global__ void MatrixMulAsyncCopyLargeChunk(float *__restrict__ C,
 
         pipe.consumer_release();
 
-        // Synchronize to make sure that the preceding
-        // computation is done before overwriting the
-        // shared memory sub-matrix buffers As and Bs in the next iteration.
-        __syncthreads();
+        // The original sample said:
+        //  Synchronize to make sure that the preceding
+        //  computation is done before overwriting the
+        //  shared memory sub-matrix buffers As and Bs in the next iteration.
+        // But I think this is unnecessary, 
+        // since we already has `acquire-release` to guarantee no shared memory will be overwritten incorrectly
+        // and the `__syncthreads()` before the computation guarantees 
+        // all the loaded data is consistent for the current iteration
+        // __syncthreads(); 
     }
 
-    // Write the block sub-matrix to device memory;
-    // each thread writes four element
+    // Write the block sub-matrix to device memory
+    // each thread writes one element
     int c                                 = wB * BLOCK_SIZE * blockIdx.y + BLOCK_SIZE * blockIdx.x;
     C[c + wB * threadIdx.y + threadIdx.x] = Csub;
 }
 
-// Single Stage memcpy_async pipeline with Large copy chunk (float4) using
-// arrive-wait barrier
+// Single Stage memcpy_async pipeline with Large copy chunk (float4) using arrive-wait barrier
 template <int BLOCK_SIZE>
 __global__ void MatrixMulAsyncCopyLargeChunkAWBarrier(float *__restrict__ C,
                                                       const float *__restrict__ A,
@@ -262,20 +258,20 @@ __global__ void MatrixMulAsyncCopyLargeChunkAWBarrier(float *__restrict__ C,
 {
 #if __CUDA_ARCH__ >= 700
 #pragma diag_suppress static_var_with_dynamic_init
-    // Requires BLOCK_SIZE % 4 == 0
-
     __shared__ cuda::barrier<cuda::thread_scope_block> bar;
 
     // Declaration of the shared memory array As used to
     // store the sub-matrix of A
+    // aligned to float4 for vectorization load
     __shared__ alignas(alignof(float4)) float As[BLOCK_SIZE][BLOCK_SIZE];
 
     // Declaration of the shared memory array Bs used to
     // store the sub-matrix of B
+    // aligned to float4 for vectorization load
     __shared__ alignas(alignof(float4)) float Bs[BLOCK_SIZE][BLOCK_SIZE];
 
     if (threadIdx.x == 0) {
-        init(&bar, blockDim.x * blockDim.y);
+        init(&bar, blockDim.x * blockDim.y); // block-level barrier
     }
     __syncthreads();
 
@@ -296,31 +292,31 @@ __global__ void MatrixMulAsyncCopyLargeChunkAWBarrier(float *__restrict__ C,
 
     float Csub = 0.0;
 
+    // one thread loads 4 float elements
     const int t4x = threadIdx.x * 4;
 
     // Loop over all the sub-matrices of A and B
     // required to compute the block sub-matrix
     for (int a = aBegin, b = bBegin; a <= aEnd; a += aStep, b += bStep) {
-        // Load the matrices from device memory to shared memory;
-        // a subset of threads loads a contiguous chunk of elements.
-
-        // Now, one fourth of the threads load four elements of each matrix
+        // Load the matrices from device memory to shared memory
+        // one thread loads 4 float elements
+        // thus only the 1/4 threads will load
         if (t4x < BLOCK_SIZE) {
             float4 *const       A4s = reinterpret_cast<float4 *>(&As[threadIdx.y][t4x]);
             float4 *const       B4s = reinterpret_cast<float4 *>(&Bs[threadIdx.y][t4x]);
             const float4 *const A4  = reinterpret_cast<const float4 *>(&A[a + wA * threadIdx.y + t4x]);
             const float4 *const B4  = reinterpret_cast<const float4 *>(&B[a + wA * threadIdx.y + t4x]);
 
+            // use barrier to apply async memcpy
             cuda::memcpy_async(A4s, A4, sizeof(float4), bar);
             cuda::memcpy_async(B4s, B4, sizeof(float4), bar);
         }
 
         // Synchronize to make sure the matrices are loaded
-        bar.arrive_and_wait();
+        bar.arrive_and_wait(); // here same to `__syncthreads()` and `consumer.wait()`
 
 // Multiply the two matrices together;
-// each thread computes one element
-// of the block sub-matrix
+// each thread computes one element of the block sub-matrix
 #pragma unroll
         for (int k = 0; k < BLOCK_SIZE; ++k) {
             Csub += As[threadIdx.y][k] * Bs[k][threadIdx.x];
@@ -333,7 +329,7 @@ __global__ void MatrixMulAsyncCopyLargeChunkAWBarrier(float *__restrict__ C,
     }
 
     // Write the block sub-matrix to device memory;
-    // each thread writes four element
+    // each thread writes one element
     int c                                 = wB * BLOCK_SIZE * blockIdx.y + BLOCK_SIZE * blockIdx.x;
     C[c + wB * threadIdx.y + threadIdx.x] = Csub;
 #endif
@@ -367,27 +363,31 @@ __global__ void MatrixMulAsyncCopySingleStage(float *C, const float *A, const fl
     int bStep = BLOCK_SIZE * wB;
 
     // Single-stage pipeline version
-    float Csub = 0.0;
-
+    // and the scope is thread-level, and the alignment is 4B (float)
     cuda::pipeline<cuda::thread_scope_thread> pipe   = cuda::make_pipeline();
     const auto                                shape1 = cuda::aligned_size_t<alignof(float)>(sizeof(float));
+
+    float Csub = 0.0;
 
     // Loop over all the sub-matrices of A and B
     // required to compute the block sub-matrix
     for (int a = aBegin, b = bBegin; a <= aEnd; a += aStep, b += bStep) {
-        // Load the matrices from device memory to shared memory; each thread loads
-        // one element of each matrix
+        // Load the matrices from device memory to shared memory; 
+        // each thread loads one element of each matrix
+        // single stage equals to native `load -> compute -> store`, w/o overlapping
         {
-            pipe.producer_acquire();
+            pipe.producer_acquire(); // producer acquires the flag to be ready to `memcpy_async` below
 
             cuda::memcpy_async(&As[threadIdx.y][threadIdx.x], &A[a + wA * threadIdx.y + threadIdx.x], shape1, pipe);
             cuda::memcpy_async(&Bs[threadIdx.y][threadIdx.x], &B[b + wB * threadIdx.y + threadIdx.x], shape1, pipe);
 
-            pipe.producer_commit();
+            pipe.producer_commit(); // producer commits all the `memcpy_async` above
         }
 
-        pipe.consumer_wait();
-        // Synchronize to make sure the matrices are loaded
+        pipe.consumer_wait(); // consumer waits for all the `memcpy_async` above to finish
+
+        // Since the pipeline is thread-level, 
+        // we still need to synchronize the block to make sure the matrices are loaded
         __syncthreads();
 
 // Multiply the two matrices together;
@@ -398,20 +398,26 @@ __global__ void MatrixMulAsyncCopySingleStage(float *C, const float *A, const fl
             Csub += As[threadIdx.y][k] * Bs[k][threadIdx.x];
         }
 
-        // Synchronize to make sure that the preceding
-        // computation is done before overwriting the
-        // shared memory sub-matrix buffers As and Bs in the next iteration.
-        __syncthreads();
+        pipe.consumer_release();
+
+        // The original sample said:
+        //  Synchronize to make sure that the preceding
+        //  computation is done before overwriting the
+        //  shared memory sub-matrix buffers As and Bs in the next iteration.
+        // But I think this is unnecessary, 
+        // since we already has `acquire-release` to guarantee no shared memory will be overwritten incorrectly
+        // and the `__syncthreads()` before the computation guarantees 
+        // all the loaded data is consistent for the current iteration
+        // __syncthreads(); 
     }
 
     // Write the block sub-matrix to device memory;
-    // each thread writes four element
+    // each thread writes one element
     int c                                 = wB * BLOCK_SIZE * blockIdx.y + BLOCK_SIZE * blockIdx.x;
     C[c + wB * threadIdx.y + threadIdx.x] = Csub;
 }
 
-// Multi Stage memcpy_async thread_scope_thread pipeline with single-element
-// async-copy
+// Multi Stage memcpy_async thread_scope_thread pipeline with single-element async-copy
 template <int BLOCK_SIZE>
 __global__ void MatrixMulAsyncCopyMultiStage(float *__restrict__ C,
                                              const float *__restrict__ A,
@@ -419,9 +425,6 @@ __global__ void MatrixMulAsyncCopyMultiStage(float *__restrict__ C,
                                              int wA,
                                              int wB)
 {
-    // Multi-stage pipeline version
-    constexpr size_t maxPipelineStages = 4;
-
     // Declaration of the shared memory array As used to
     // store the sub-matrix of A for each stage
     __shared__ float As[maxPipelineStages][BLOCK_SIZE][BLOCK_SIZE];
@@ -447,52 +450,65 @@ __global__ void MatrixMulAsyncCopyMultiStage(float *__restrict__ C,
     // Step size used to iterate through the sub-matrices of B
     int bStep = BLOCK_SIZE * wB;
 
+    // 4-stage pipeline version
+    // and the scope is thread-level, and the alignment is 4B (float)
     cuda::pipeline<cuda::thread_scope_thread> pipe   = cuda::make_pipeline();
     const auto                                shape1 = cuda::aligned_size_t<alignof(float)>(sizeof(float));
 
     // Loop over all the sub-matrices of A and B
     // required to compute the block sub-matrix
-    for (int a = aBegin, b = bBegin, i = 0, aStage = aBegin, bStage = bBegin, iStage = 0; a <= aEnd;
+    for (int a = aBegin, b = bBegin, i = 0, aStage = aBegin, bStage = bBegin, jStage = 0; a <= aEnd;
          a += aStep, b += bStep, ++i) {
-        // Load the matrices from device memory to shared memory; each thread loads
-        // one element of each matrix
-
-        for (; aStage <= a + aStep * maxPipelineStages; aStage += aStep, bStage += bStep, ++iStage) {
+        // Async Load the matrices from device memory to shared memory for the next n stages
+        // each thread loads one element of each matrix
+        // where n = 4 for the 0th iteration to fill up the 4 buffers
+        // and then n = 1 to pre-fetch next one stage whose buffer is just consumed in the previous iteration
+        for (; aStage <= a + aStep * maxPipelineStages; aStage += aStep, bStage += bStep, ++jStage) {
             if (aStage <= aEnd) {
-                // Rotating buffer
-                const int j = iStage % maxPipelineStages;
+                // Rotating buffer fo jth stage
+                const int j = jStage % maxPipelineStages;
 
+                // producer acquires the flag of the jth stage for all the `memcpy_async` below
+                // i.e. waiting for the jth stage of the buffer to be released by the consumer
                 pipe.producer_acquire();
 
+                // define the memcpy jobs for jth stage to the producer queue
                 cuda::memcpy_async(
                     &As[j][threadIdx.y][threadIdx.x], &A[aStage + wA * threadIdx.y + threadIdx.x], shape1, pipe);
                 cuda::memcpy_async(
                     &Bs[j][threadIdx.y][threadIdx.x], &B[bStage + wB * threadIdx.y + threadIdx.x], shape1, pipe);
 
+                // producer commits the `memcpy_async` above for jth stage
                 pipe.producer_commit();
             }
         }
+
+        // consumer waits for the most previous stage (i.e. the ith stage) of `memcpy_async` to finish
         pipe.consumer_wait();
 
-        // Synchronize to make sure the matrices are loaded
+        // Since the pipeline is thread-level, 
+        // we still need to synchronize the block to make sure the matrices are loaded for the 
         __syncthreads();
 
         const int j = i % maxPipelineStages;
 
-        // Multiply the two matrices together;
-        // each thread computes one element
-        // of the block sub-matrix
+        // Multiply the two matrices together for the ith stage
+        // each thread computes one element of the block sub-matrix
         for (int k = 0; k < BLOCK_SIZE; ++k) {
             Csub += As[j][threadIdx.y][k] * Bs[j][k][threadIdx.x];
         }
 
+        // consumer releases the flag for the most previous stage (i.e. the ith stage)
+        // to tell the producer that this buffer is ready to reuse
         pipe.consumer_release();
-        // Don't have to synchronize because maxPipelineStages is greater than one
-        // therefore next iteration is loading to a different buffer.
+
+        // NOTE: Don't have to synchronize because maxPipelineStages is greater than one
+        // therefore next iteration is loading to a different buffer (i.e. the (i+1)th buffer)
+        // __syncthreads();
     }
 
     // Write the block sub-matrix to device memory;
-    // each thread writes four element
+    // each thread writes one element
     int c                                 = wB * BLOCK_SIZE * blockIdx.y + BLOCK_SIZE * blockIdx.x;
     C[c + wB * threadIdx.y + threadIdx.x] = Csub;
 }
@@ -500,101 +516,112 @@ __global__ void MatrixMulAsyncCopyMultiStage(float *__restrict__ C,
 // Multi Stage shared state memcpy_async pipeline thread_scope_block
 // with parititioned producer & consumer, here we've 1 warp as producer
 // group which issues memcpy_async operations and rest all warps are part of
-// consumer group which perform gemm computation on the loaded matrices by
-// producer.
-template <int BLOCK_SIZE_X>
+// consumer group which perform gemm computation on the loaded matrices by producer.
+template <int BLOCK_SIZE>
 __global__ void MatrixMulAsyncCopyMultiStageSharedState(float *__restrict__ C,
                                                         const float *__restrict__ A,
                                                         const float *__restrict__ B,
                                                         int wA,
                                                         int wB)
 {
-    // Multi-stage pipeline version
-    constexpr size_t maxPipelineStages = 4;
-
     // Declaration of the shared memory array As used to
     // store the sub-matrix of A for each stage
-    __shared__ float As[maxPipelineStages][BLOCK_SIZE_X][BLOCK_SIZE_X];
+    __shared__ float As[maxPipelineStages][BLOCK_SIZE][BLOCK_SIZE];
 
     // Declaration of the shared memory array Bs used to
     // store the sub-matrix of B for each stage
-    __shared__ float Bs[maxPipelineStages][BLOCK_SIZE_X][BLOCK_SIZE_X];
+    __shared__ float Bs[maxPipelineStages][BLOCK_SIZE][BLOCK_SIZE];
 
     float Csub = 0.0;
 
     // Index of the first sub-matrix of A processed by the block
-    const int aBegin = wA * BLOCK_SIZE_X * blockIdx.y;
+    const int aBegin = wA * BLOCK_SIZE * blockIdx.y;
 
     // Index of the last sub-matrix of A processed by the block
     const int aEnd = aBegin + wA - 1;
 
     // Step size used to iterate through the sub-matrices of A
-    constexpr int aStep = BLOCK_SIZE_X;
+    constexpr int aStep = BLOCK_SIZE;
 
     // Index of the first sub-matrix of B processed by the block
-    const int bBegin = BLOCK_SIZE_X * blockIdx.x;
+    const int bBegin = BLOCK_SIZE * blockIdx.x;
 
     // Step size used to iterate through the sub-matrices of B
-    int bStep = BLOCK_SIZE_X * wB;
+    int bStep = BLOCK_SIZE * wB;
 
     auto cta = cg::this_thread_block();
 
+    // 4 stage pipeline
+    // and the scope is block-level, and the alignment is 4B (float)
+    // since the scope is block-level, we need to prepare the sharded_state in the shared memory for all stages
     const auto shape1 = cuda::aligned_size_t<alignof(float)>(sizeof(float));
     __shared__ cuda::pipeline_shared_state<cuda::thread_scope_block, maxPipelineStages> shared_state;
-    constexpr int consumer_row_count = BLOCK_SIZE_X;
+    const int producerStrideRows = (blockDim.y - BLOCK_SIZE);
 
-    const auto thread_role =
-        (cta.thread_index().y < consumer_row_count) ? cuda::pipeline_role::consumer : cuda::pipeline_role::producer;
+    // the first BLOCK_SIZE rows of threads are consumers
+    // and the last extra (blockDim.y - BLOCK_SIZE) rows of threads are producers
+    const bool isConsumer = threadIdx.y < BLOCK_SIZE;
+    const auto thread_role = isConsumer ? cuda::pipeline_role::consumer : cuda::pipeline_role::producer;
     auto pipe = cuda::make_pipeline(cta, &shared_state, thread_role);
 
     // Loop over all the sub-matrices of A and B
     // required to compute the block sub-matrix
-    for (int a = aBegin, b = bBegin, i = 0, aStage = aBegin, bStage = bBegin, iStage = 0; a <= aEnd;
+    for (int a = aBegin, b = bBegin, i = 0, aStage = aBegin, bStage = bBegin, jStage = 0; a <= aEnd;
          a += aStep, b += bStep, ++i) {
-        if (threadIdx.y >= consumer_row_count) {
-            // this is a whole producer warp because threadIdx.y >= 16 where 16 ==
-            // consumer_row_count,
-            // which loads the matrices from device memory to shared memory;
-            for (; aStage <= a + aStep * maxPipelineStages; aStage += aStep, bStage += bStep, ++iStage) {
+        if (!isConsumer) { // producer threads (the last warp)
+            // load the matrices from device memory to shared memory for the next n stages
+            // each producer loads one element of each matrix
+            for (; aStage <= a + aStep * maxPipelineStages; aStage += aStep, bStage += bStep, ++jStage) {
                 if (aStage <= aEnd) {
-                    // Rotating buffer
-                    const int j          = iStage % maxPipelineStages;
-                    const int strideRows = (blockDim.y - consumer_row_count);
+                    // Rotating buffer for jth stage
+                    const int j = jStage % maxPipelineStages;
+    
+                    // acquire the producer slot for jth stage
                     pipe.producer_acquire();
-                    for (int rowId = threadIdx.y - consumer_row_count; rowId < BLOCK_SIZE_X; rowId += strideRows) {
+                    
+                    // define the memcpy jobs for jth stage to the producer queue
+                    for (int rowId = threadIdx.y - BLOCK_SIZE; rowId < BLOCK_SIZE; rowId += producerStrideRows) {
                         cuda::memcpy_async(
                             &As[j][rowId][threadIdx.x], &A[aStage + wA * rowId + threadIdx.x], shape1, pipe);
                         cuda::memcpy_async(
                             &Bs[j][rowId][threadIdx.x], &B[bStage + wB * rowId + threadIdx.x], shape1, pipe);
                     }
+                    
+                    // producer commits the `memcpy_async` above for jth stage
                     pipe.producer_commit();
                 }
             }
         }
-        else {
-            // this is a whole set of consumer group because threadIdx.y <
-            // consumer_row_count where consumer_row_count == 16,
-            // which computes gemm operation on matrices loaded in shared memory by
-            // producer warp.
+        else { // consumer threads (the first warps except the last one)
+            // this is a whole set of consumer group 
+            // which computes gemm operation on matrices loaded in shared memory by producer warp.
             const int j = i % maxPipelineStages;
-            // Synchronize consumer group to make sure the matrices are loaded by
-            // producer group.
+            
+            // Synchronize consumer group to make sure the matrices are loaded by producer group for the ith stage
             pipe.consumer_wait();
+
+            // no need and should not use `__syncthreads()` here
+            // since only BLOCK_SIZE rows of threads are consumers
+            // and the block-level scope of pipeline provides the synchronization into `consumer_wait`
+
 // Multiply the two matrices together;
-// each thread computes one element
-// of the block sub-matrix
+// each thread computes one element of the block sub-matrix
 #pragma unroll
-            for (int k = 0; k < BLOCK_SIZE_X; ++k) {
+            for (int k = 0; k < BLOCK_SIZE; ++k) {
                 Csub += As[j][threadIdx.y][k] * Bs[j][k][threadIdx.x];
             }
+            
+            // release the flag for the ith stage of buffer to be reused by producer group
             pipe.consumer_release();
+
+            // the same, no need and should not use `__syncthreads()` here
         }
     }
 
     // Write the block sub-matrix to device memory;
-    // each thread writes four element
-    if (threadIdx.y < consumer_row_count) {
-        const int c                           = wB * BLOCK_SIZE_X * blockIdx.y + BLOCK_SIZE_X * blockIdx.x;
+    // each consumer thread writes one element
+    if (isConsumer) { // consumer threads
+        const int c                           = wB * BLOCK_SIZE * blockIdx.y + BLOCK_SIZE * blockIdx.x;
         C[c + wB * threadIdx.y + threadIdx.x] = Csub;
     }
 }
@@ -613,17 +640,18 @@ template <int BLOCK_SIZE> __global__ void MatrixMulNaive(float *C, float *A, flo
     // store the sub-matrix of B
     __shared__ float Bs[BLOCK_SIZE][BLOCK_SIZE];
 
-    // Index of the first sub-matrix of A processed by the block
+    // Index (top-left) of the first sub-matrix of A processed by the block
     int aBegin = wA * BLOCK_SIZE * blockIdx.y;
 
-    // Index of the last sub-matrix of A processed by the block
+    // Index (top-left) of the last sub-matrix of A processed by the block
     int aEnd = aBegin + wA - 1;
 
     // Step size used to iterate through the sub-matrices of A
     int aStep = BLOCK_SIZE;
 
-    // Index of the first sub-matrix of B processed by the block
+    // Index (top-left) of the first sub-matrix of B processed by the block
     int bBegin = BLOCK_SIZE * blockIdx.x;
+    // int bEnd = bBegin + BLOCK_SIZE * wA - 1; // wA/hB is the leading dimension
 
     // Step size used to iterate through the sub-matrices of B
     int bStep = BLOCK_SIZE * wB;
@@ -632,21 +660,19 @@ template <int BLOCK_SIZE> __global__ void MatrixMulNaive(float *C, float *A, flo
     // that is computed by the thread
     float Csub = 0;
 
-    // Loop over all the sub-matrices of A and B
+    // Loop over all the sub-matrices of A and B (assuming wA/hB,wB is divisible by BLOCK_SIZE)
     // required to compute the block sub-matrix
     for (int a = aBegin, b = bBegin; a <= aEnd; a += aStep, b += bStep) {
-        // Load the matrices from device memory
-        // to shared memory; each thread loads
-        // one element of each matrix
+        // Load the matrices from device memory to shared memory
+        // each thread loads one element of each matrix
         As[threadIdx.y][threadIdx.x] = A[a + wA * threadIdx.y + threadIdx.x];
         Bs[threadIdx.y][threadIdx.x] = B[b + wB * threadIdx.y + threadIdx.x];
 
         // Synchronize to make sure the matrices are loaded
         __syncthreads();
 
-// Multiply the two matrices together;
-// each thread computes one element
-// of the block sub-matrix
+// Multiply the two matrices together
+// each thread computes one element of the block sub-matrix
 #pragma unroll
         for (int k = 0; k < BLOCK_SIZE; ++k) {
             Csub += As[threadIdx.y][k] * Bs[k][threadIdx.x];
@@ -658,9 +684,9 @@ template <int BLOCK_SIZE> __global__ void MatrixMulNaive(float *C, float *A, flo
         __syncthreads();
     }
 
-    // Write the block sub-matrix to device memory;
+    // Write the block sub-matrix to device memory (assuming hA is divisible by BLOCK_SIZE)
     // each thread writes one element
-    int c                                 = wB * BLOCK_SIZE * blockIdx.y + BLOCK_SIZE * blockIdx.x;
+    int c                                 = wB * BLOCK_SIZE * blockIdx.y + BLOCK_SIZE * blockIdx.x; // c's shape=(hA, wB)
     C[c + wB * threadIdx.y + threadIdx.x] = Csub;
 }
 
@@ -668,12 +694,16 @@ template <int BLOCK_SIZE> __global__ void MatrixMulNaiveLargeChunk(float *C, flo
 {
     // Declaration of the shared memory array As used to
     // store the sub-matrix of A
-    __shared__ alignas(alignof(float4)) float As[BLOCK_SIZE][BLOCK_SIZE];
+    // aligned to float4 for vectorization load
+    __shared__ alignas(alignof(float4)) float As[BLOCK_SIZE][BLOCK_SIZE]; // equals to `alignas(16)` or `__align__(16)`
 
     // Declaration of the shared memory array Bs used to
     // store the sub-matrix of B
-    __shared__ alignas(alignof(float4)) float Bs[BLOCK_SIZE][BLOCK_SIZE];
+    // aligned to float4 for vectorization load
+    __shared__ alignas(alignof(float4)) float Bs[BLOCK_SIZE][BLOCK_SIZE]; // equals to `alignas(16)` or `__align__(16)`
 
+    // one thread will load 4 float of both A and B, so multiply 4 for threadIdx.x
+    // since one transaction is 128bit (4 x 32bit per float)
     int t4x = threadIdx.x * 4;
 
     // Index of the first sub-matrix of A processed by the block
@@ -698,10 +728,8 @@ template <int BLOCK_SIZE> __global__ void MatrixMulNaiveLargeChunk(float *C, flo
     // Loop over all the sub-matrices of A and B
     // required to compute the block sub-matrix
     for (int a = aBegin, b = bBegin; a <= aEnd; a += aStep, b += bStep) {
-        // Load the matrices from device memory
-        // to shared memory;
-
-        // One fourth of the threads load four elements of each matrix
+        // Vectorized load the matrices from device memory to shared memory;
+        // One thread load four elements of each matrix
         if (t4x < BLOCK_SIZE) {
             float4 *const       A4s = reinterpret_cast<float4 *>(&As[threadIdx.y][t4x]);
             float4 *const       B4s = reinterpret_cast<float4 *>(&Bs[threadIdx.y][t4x]);
@@ -715,8 +743,7 @@ template <int BLOCK_SIZE> __global__ void MatrixMulNaiveLargeChunk(float *C, flo
         __syncthreads();
 
 // Multiply the two matrices together;
-// each thread computes one element
-// of the block sub-matrix
+// each thread computes one element of the block sub-matrix
 #pragma unroll
         for (int k = 0; k < BLOCK_SIZE; ++k) {
             Csub += As[threadIdx.y][k] * Bs[k][threadIdx.x];
@@ -741,12 +768,44 @@ void ConstantInit(float *data, int size, float val)
     }
 }
 
+void applyKernel(float *d_A, float *d_B, float *d_C, const dim3 &grid, const dim3 &threads, const dim3 &dimsA, const dim3 &dimsB, kernels kernel_number, cudaStream_t stream) {
+    switch (kernel_number) {
+        case AsyncCopyMultiStageLargeChunk:
+        default:
+            MatrixMulAsyncCopyMultiStageLargeChunk<blockSize>
+                <<<grid, threads, 0, stream>>>(d_C, d_A, d_B, dimsA.x, dimsB.x);
+            break;
+        case AsyncCopyLargeChunk:
+            MatrixMulAsyncCopyLargeChunk<blockSize><<<grid, threads, 0, stream>>>(d_C, d_A, d_B, dimsA.x, dimsB.x);
+            break;
+        case AsyncCopyLargeChunkAWBarrier:
+            MatrixMulAsyncCopyLargeChunkAWBarrier<blockSize><<<grid, threads, 0, stream>>>(d_C, d_A, d_B, dimsA.x, dimsB.x);
+            break;
+        case AsyncCopyMultiStageSharedState:
+            MatrixMulAsyncCopyMultiStageSharedState<blockSize>
+                <<<grid, threads, 0, stream>>>(d_C, d_A, d_B, dimsA.x, dimsB.x);
+            break;
+        case AsyncCopyMultiStage:
+            MatrixMulAsyncCopyMultiStage<blockSize><<<grid, threads, 0, stream>>>(d_C, d_A, d_B, dimsA.x, dimsB.x);
+            break;
+        case AsyncCopySingleStage:
+            MatrixMulAsyncCopySingleStage<blockSize><<<grid, threads, 0, stream>>>(d_C, d_A, d_B, dimsA.x, dimsB.x);
+            break;
+        case Naive:
+            MatrixMulNaive<blockSize><<<grid, threads, 0, stream>>>(d_C, d_A, d_B, dimsA.x, dimsB.x);
+            break;
+        case NaiveLargeChunk:
+            MatrixMulNaiveLargeChunk<blockSize><<<grid, threads, 0, stream>>>(d_C, d_A, d_B, dimsA.x, dimsB.x);
+            break;
+    }
+}
+
 /**
  * Run matrix multiplication using CUDA
  */
 int MatrixMultiply(int argc, char **argv, const dim3 &dimsA, const dim3 &dimsB, kernels kernel_number)
 {
-    // Allocate host memory for matrices A and B
+    // Allocate host memory for matrices A of shape=(dimsA.y, dimsA.x) and B of shape=(dimsB.y, dimsB.x)
     unsigned int size_A     = dimsA.x * dimsA.y;
     unsigned int mem_size_A = sizeof(float) * size_A;
     float       *h_A;
@@ -765,7 +824,7 @@ int MatrixMultiply(int argc, char **argv, const dim3 &dimsA, const dim3 &dimsB, 
     // Allocate device memory
     float *d_A, *d_B, *d_C;
 
-    // Allocate host matrix C
+    // Allocate host matrix C of shape=(dimsA.y, dimsB.x)
     dim3         dimsC(dimsB.x, dimsA.y, 1);
     unsigned int mem_size_C = dimsC.x * dimsC.y * sizeof(float);
     float       *h_C;
@@ -805,34 +864,10 @@ int MatrixMultiply(int argc, char **argv, const dim3 &dimsA, const dim3 &dimsB, 
     printf("Computing result using CUDA Kernel...\n");
 
     // Performs warmup operation using matrixMul CUDA kernel
-    switch (kernel_number) {
-    case AsyncCopyMultiStageLargeChunk:
-    default:
-        MatrixMulAsyncCopyMultiStageLargeChunk<blockSize>
-            <<<grid, threads, 0, stream>>>(d_C, d_A, d_B, dimsA.x, dimsB.x);
-        break;
-    case AsyncCopyLargeChunk:
-        MatrixMulAsyncCopyLargeChunk<blockSize><<<grid, threads, 0, stream>>>(d_C, d_A, d_B, dimsA.x, dimsB.x);
-        break;
-    case AsyncCopyLargeChunkAWBarrier:
-        MatrixMulAsyncCopyLargeChunkAWBarrier<blockSize><<<grid, threads, 0, stream>>>(d_C, d_A, d_B, dimsA.x, dimsB.x);
-        break;
-    case AsyncCopyMultiStageSharedState:
-        MatrixMulAsyncCopyMultiStageSharedState<blockSize>
-            <<<gridSharedStateKernel, threadsSharedStateKernel, 0, stream>>>(d_C, d_A, d_B, dimsA.x, dimsB.x);
-        break;
-    case AsyncCopyMultiStage:
-        MatrixMulAsyncCopyMultiStage<blockSize><<<grid, threads, 0, stream>>>(d_C, d_A, d_B, dimsA.x, dimsB.x);
-        break;
-    case AsyncCopySingleStage:
-        MatrixMulAsyncCopySingleStage<blockSize><<<grid, threads, 0, stream>>>(d_C, d_A, d_B, dimsA.x, dimsB.x);
-        break;
-    case Naive:
-        MatrixMulNaive<blockSize><<<grid, threads, 0, stream>>>(d_C, d_A, d_B, dimsA.x, dimsB.x);
-        break;
-    case NaiveLargeChunk:
-        MatrixMulNaiveLargeChunk<blockSize><<<grid, threads, 0, stream>>>(d_C, d_A, d_B, dimsA.x, dimsB.x);
-        break;
+    if (kernel_number == AsyncCopyMultiStageSharedState) {
+        applyKernel(d_A, d_B, d_C, gridSharedStateKernel, threadsSharedStateKernel, dimsA, dimsB, kernel_number, stream);
+    } else {
+        applyKernel(d_A, d_B, d_C, grid, threads, dimsA, dimsB, kernel_number, stream);
     }
 
     printf("done\n");
@@ -845,35 +880,10 @@ int MatrixMultiply(int argc, char **argv, const dim3 &dimsA, const dim3 &dimsB, 
     checkCudaErrors(cudaEventRecord(start, stream));
 
     for (int j = 0; j < nIter; j++) {
-        switch (kernel_number) {
-        case AsyncCopyMultiStageLargeChunk:
-        default:
-            MatrixMulAsyncCopyMultiStageLargeChunk<blockSize>
-                <<<grid, threads, 0, stream>>>(d_C, d_A, d_B, dimsA.x, dimsB.x);
-            break;
-        case AsyncCopyLargeChunk:
-            MatrixMulAsyncCopyLargeChunk<blockSize><<<grid, threads, 0, stream>>>(d_C, d_A, d_B, dimsA.x, dimsB.x);
-            break;
-        case AsyncCopyLargeChunkAWBarrier:
-            MatrixMulAsyncCopyLargeChunkAWBarrier<blockSize>
-                <<<grid, threads, 0, stream>>>(d_C, d_A, d_B, dimsA.x, dimsB.x);
-            break;
-        case AsyncCopyMultiStageSharedState:
-            MatrixMulAsyncCopyMultiStageSharedState<blockSize>
-                <<<gridSharedStateKernel, threadsSharedStateKernel, 0, stream>>>(d_C, d_A, d_B, dimsA.x, dimsB.x);
-            break;
-        case AsyncCopyMultiStage:
-            MatrixMulAsyncCopyMultiStage<blockSize><<<grid, threads, 0, stream>>>(d_C, d_A, d_B, dimsA.x, dimsB.x);
-            break;
-        case AsyncCopySingleStage:
-            MatrixMulAsyncCopySingleStage<blockSize><<<grid, threads, 0, stream>>>(d_C, d_A, d_B, dimsA.x, dimsB.x);
-            break;
-        case Naive:
-            MatrixMulNaive<blockSize><<<grid, threads, 0, stream>>>(d_C, d_A, d_B, dimsA.x, dimsB.x);
-            break;
-        case NaiveLargeChunk:
-            MatrixMulNaiveLargeChunk<blockSize><<<grid, threads, 0, stream>>>(d_C, d_A, d_B, dimsA.x, dimsB.x);
-            break;
+        if (kernel_number == AsyncCopyMultiStageSharedState) {
+            applyKernel(d_A, d_B, d_C, gridSharedStateKernel, threadsSharedStateKernel, dimsA, dimsB, kernel_number, stream);
+        } else {
+            applyKernel(d_A, d_B, d_C, grid, threads, dimsA, dimsB, kernel_number, stream);
         }
     }
 
@@ -890,10 +900,10 @@ int MatrixMultiply(int argc, char **argv, const dim3 &dimsA, const dim3 &dimsB, 
     float  msecPerMatrixMul = msecTotal / nIter;
     double flopsPerMatrixMul =
         2.0 * static_cast<double>(dimsA.x) * static_cast<double>(dimsA.y) * static_cast<double>(dimsB.x);
-    double gigaFlops = (flopsPerMatrixMul * 1.0e-9f) / (msecPerMatrixMul / 1000.0f);
-    printf("Performance= %.2f GFlop/s, Time= %.3f msec, Size= %.0f Ops,"
-           " WorkgroupSize= %u threads/block\n",
-           gigaFlops,
+    double teraFlops = (flopsPerMatrixMul * 1.0e-12f) / (msecPerMatrixMul / 1000.0f);
+    printf("Performance = %.4f TFlop/s, Time = %.3f msec, Size = %.0f Ops,"
+           " WorkgroupSize = %u threads/block\n",
+           teraFlops,
            msecPerMatrixMul,
            flopsPerMatrixMul,
            threads.x * threads.y);
@@ -968,9 +978,9 @@ int main(int argc, char **argv)
     // override the device ID based on input provided at the command line
     int dev = findCudaDevice(argc, (const char **)argv);
 
-    int  matrixBlock = 32;
-    dim3 dimsA(10 * 4 * matrixBlock, 10 * 4 * matrixBlock, 1);
-    dim3 dimsB(10 * 4 * matrixBlock, 10 * 4 * matrixBlock, 1);
+    int num_blocks_m = 128, num_blocks_n = 128, num_blocks_k = 64; // 8k, 8k, 4k
+    dim3 dimsA(num_blocks_m * maxPipelineStages * blockSize, num_blocks_k * maxPipelineStages * blockSize, 1);
+    dim3 dimsB(num_blocks_k * maxPipelineStages * blockSize, num_blocks_n * maxPipelineStages * blockSize, 1);
 
     // width of Matrix A
     if (checkCmdLineFlag(argc, (const char **)argv, "wA")) {
