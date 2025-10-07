@@ -181,12 +181,12 @@ void initializeCUDA(int argc, char **argv, int &devID, int &iSizeMultiple, sMatr
 
     int block_size = 32;
 
-    matrix_size.uiWA = 3 * block_size * iSizeMultiple;
-    matrix_size.uiHA = 4 * block_size * iSizeMultiple;
-    matrix_size.uiWB = 2 * block_size * iSizeMultiple;
-    matrix_size.uiHB = 3 * block_size * iSizeMultiple;
-    matrix_size.uiWC = 2 * block_size * iSizeMultiple;
-    matrix_size.uiHC = 4 * block_size * iSizeMultiple;
+    matrix_size.uiWA = 8 * block_size * iSizeMultiple;
+    matrix_size.uiHA = 16 * block_size * iSizeMultiple;
+    matrix_size.uiWB = 16 * block_size * iSizeMultiple;
+    matrix_size.uiHB = 8 * block_size * iSizeMultiple;
+    matrix_size.uiWC = 16 * block_size * iSizeMultiple;
+    matrix_size.uiHC = 16 * block_size * iSizeMultiple;
 
     printf("MatrixA(%u,%u), MatrixB(%u,%u), MatrixC(%u,%u)\n",
            matrix_size.uiHA,
@@ -264,6 +264,7 @@ int matrixMultiply(int argc, char **argv, int devID, sMatrixSize &matrix_size)
         cublasHandle_t handle;
         cudaEvent_t    start, stop;
 
+        // creat the handle
         checkCudaErrors(cublasCreate(&handle));
 
         // Perform warmup operation with cublas
@@ -290,22 +291,30 @@ int matrixMultiply(int argc, char **argv, int devID, sMatrixSize &matrix_size)
         checkCudaErrors(cudaEventRecord(start, NULL));
 
         for (int j = 0; j < nIter; j++) {
-            // note cublas is column primary!
-            // need to transpose the order
+            // note cublas is column primary by default for A,B,C
+            // i.e. it wll calculate: C.T = alpha * A.T * B.T + beta * C.T
+            // given A, B, C in row-major, with alpha and beta, if shape matches
+            // so if you want to get: C = alpha * A * B + beta * C
+            // you have to apply: C.T = alpha * B.T * A.T + beta * C.T
+            // then you can get: C = (C.T).T = (alpha * B.T * A.T + beta * C.T).T = alpha * A * B + beta * C
+            // therefore, you have to pass B, A, C in row-major, with alpha and beta
+            // all in all, a quick phrase: 
+            // "passing matrix X stored in row-major/col-major can be taken as passing matrix X.T loaded in col-major/row-major"
             checkCudaErrors(cublasSgemm(handle,
-                                        CUBLAS_OP_N,
-                                        CUBLAS_OP_N,
-                                        matrix_size.uiWB,
-                                        matrix_size.uiHA,
-                                        matrix_size.uiWA,
+                                        CUBLAS_OP_N, // no transpose arg(A)
+                                        CUBLAS_OP_N, // no transpose arg(B)
+                                        matrix_size.uiWB, // arg(m), equals to real n
+                                        matrix_size.uiHA, // arg(n), equals to real m
+                                        matrix_size.uiWA, // arg(k), equals to real k
                                         &alpha,
-                                        d_B,
-                                        matrix_size.uiWB,
-                                        d_A,
-                                        matrix_size.uiWA,
+                                        d_B, // arg(A), shape=(k, n), will be taken as B.T inside
+                                        matrix_size.uiWB, // arg(lda), equals to real n due to col-major
+                                        d_A, // arg(B), shape=(m, k), will be taken as A.T inside
+                                        matrix_size.uiWA, // arg(ldb), equals to real k due to col-major
                                         &beta,
-                                        d_C,
-                                        matrix_size.uiWB));
+                                        d_C, // arg(C), shape=(m, n), will be taken as C.T inside
+                                        matrix_size.uiWB // arg(ldc), equals to real n due to col-major
+                            ));
         }
 
         printf("done.\n");
@@ -322,11 +331,10 @@ int matrixMultiply(int argc, char **argv, int devID, sMatrixSize &matrix_size)
         // Compute and print the performance
         float  msecPerMatrixMul  = msecTotal / nIter;
         double flopsPerMatrixMul = 2.0 * (double)matrix_size.uiHC * (double)matrix_size.uiWC * (double)matrix_size.uiHB;
-        double gigaFlops         = (flopsPerMatrixMul * 1.0e-9f) / (msecPerMatrixMul / 1000.0f);
-        printf("Performance= %.2f GFlop/s, Time= %.3f msec, Size= %.0f Ops\n",
-               gigaFlops,
-               msecPerMatrixMul,
-               flopsPerMatrixMul);
+        double teraFlops         = (flopsPerMatrixMul * 1.0e-12f) / (msecPerMatrixMul / 1000.0f);
+        printf("Performance = %.4f TFlop/s, Time = %.3f msec\n",
+               teraFlops,
+               msecPerMatrixMul);
 
         // copy result from device to host
         checkCudaErrors(cudaMemcpy(h_CUBLAS, d_C, mem_size_C, cudaMemcpyDeviceToHost));

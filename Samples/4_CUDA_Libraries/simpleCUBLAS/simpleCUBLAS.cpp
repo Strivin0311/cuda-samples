@@ -45,7 +45,8 @@
 #define N (275)
 
 /* Host implementation of a simple version of sgemm 
-*   C = alpha * A * B + beta * C
+*   C.T = alpha * A.T * B.T + beta * C.T
+*   given A, B, C in row-major, with alpha and beta, if shape matches
 */
 static void simple_sgemm(int n, float alpha, const float *A, const float *B, float beta, float *C)
 {
@@ -58,9 +59,10 @@ static void simple_sgemm(int n, float alpha, const float *A, const float *B, flo
             float prod = 0;
 
             for (k = 0; k < n; ++k) {
+                // NOTE: cublas is column major for both A and B by default
                 prod += A[k * n + i] * B[j * n + k];
             }
-
+            // NOTE: cublas is column major for C by default as well
             C[j * n + i] = alpha * prod + beta * C[j * n + i];
         }
     }
@@ -172,9 +174,25 @@ int main(int argc, char **argv)
     h_C_ref = h_C;
 
     /* Performs sgemm using cublas with the handle
-    *   C = alpha * A * B + beta * C
+    *   C.T = alpha * A.T * B.T + beta * C.T
+    *   given A, B, C in row-major, with alpha and beta, if shape matches
     */
-    status = cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, N, N, N, &alpha, d_A, N, d_B, N, &beta, d_C, N);
+    status = cublasSgemm(
+        handle, // handle
+        CUBLAS_OP_N, // transpose A ?
+        CUBLAS_OP_N, // transpose B ?
+        N, // m
+        N, // n
+        N, // k
+        &alpha, // alpha
+        d_A, // A
+        N, // lda
+        d_B, // B
+        N, // ldb
+        &beta, // beta
+        d_C, // C
+        N // ldc
+    );
 
     if (status != CUBLAS_STATUS_SUCCESS) {
         fprintf(stderr, "!!!! kernel execution error.\n");
