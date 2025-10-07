@@ -41,29 +41,50 @@ namespace cg = cooperative_groups;
 // warp-aggregated atomic increment
 __device__ int atomicAggInc(int *counter)
 {
+    // get the active threads in the warp
+    // who get into here at the same time
+    // i.e. {tid | src[tid] > 0, tid ∈ this warp}
     cg::coalesced_group active = cg::coalesced_threads();
 
-    // leader does the update
+    // leader (fist active lane, might not be the lane0)
+    // does the update for the whole warp
     int res = 0;
     if (active.thread_rank() == 0) {
         res = atomicAdd(counter, active.size());
     }
 
-    // broadcast result
+    // broadcast result from the leader to all other active threads in the warp
     res = active.shfl(res, 0);
 
     // each thread computes its own value
+    // with the rank in the active threads as the bias
+    // might not be the lane id
     return res + active.thread_rank();
+}
+
+__global__ void filter_arr_naive(int *dst, int *nres, const int *src, int n) {
+    int id = threadIdx.x + blockIdx.x * blockDim.x;
+    
+    for (int i = id; i < n; i += gridDim.x * blockDim.x) {
+        if (src[i] > 0) { // warp divergence
+            int pos = atomicAdd(nres, 1);  // each thread adds 1, causing too many conflicts
+            dst[pos] = src[i]; // the position is random and not coalesced to the threads in the same warp
+        }
+    }
 }
 
 __global__ void filter_arr(int *dst, int *nres, const int *src, int n)
 {
-    int id = threadIdx.x + blockIdx.x * blockDim.x;
-
-    for (int i = id; i < n; i += gridDim.x * blockDim.x) {
-        if (src[i] > 0)
+#if __CUDA_ARCH__ >= 700
+    cg::grid_group grid = cg::this_grid();
+    for (int i = grid.thread_rank(); i < n; i += grid.size()) {
+        if (src[i] > 0) // warp divergence
+            // only active threads in the warp get into `atomicAggInc`
+            // where the leader will update the counter by the number of active threads with only one atomicAdd op
+            // and the rest active threads will get the same old value with their unique bias
             dst[atomicAggInc(nres)] = src[i];
     }
+#endif
 }
 
 // warp-aggregated atomic multi bucket increment
@@ -72,24 +93,24 @@ __device__ int atomicAggIncMulti(const int bucket, int *counter)
 {
     cg::coalesced_group active = cg::coalesced_threads();
     // group all threads with same bucket value.
-    auto labeledGroup = cg::labeled_partition(active, bucket);
+    cg::coalesced_group labeledGroup = cg::labeled_partition(active, bucket);
 
     int res = 0;
     if (labeledGroup.thread_rank() == 0) {
         res = atomicAdd(&counter[bucket], labeledGroup.size());
     }
 
-    // broadcast result
+    // broadcast result in the same bucket
     res = labeledGroup.shfl(res, 0);
 
     // each thread computes its own value
+    // with the rank in the active threads within the same bucket as the bias
     return res + labeledGroup.thread_rank();
 }
 #endif
 
 // Places individual value indices into its corresponding buckets.
-__global__ void
-mapToBuckets(const int *srcArr, int *indicesBuckets, int *bucketCounters, const int srcSize, const int numOfBuckets)
+__global__ void mapToBuckets(const int *srcArr, int *indicesBuckets, int *bucketCounters, const int srcSize, const int numOfBuckets)
 {
 #if __CUDA_ARCH__ >= 700
     cg::grid_group grid = cg::this_grid();
@@ -153,10 +174,12 @@ __device__ void atomicAggMaxMulti(const int bucket, int *counter, const int valu
 {
     cg::coalesced_group active = cg::coalesced_threads();
     // group all threads with same bucket value.
-    auto labeledGroup = cg::labeled_partition(active, bucket);
+    cg::coalesced_group labeledGroup = cg::labeled_partition(active, bucket);
 
+    // reduce the max value in the bucket
     const int maxValueInGroup = cg::reduce(labeledGroup, valueForMax, cg::greater<int>());
 
+    // the leader updates the counter with the max value in the same bucket
     if (labeledGroup.thread_rank() == 0) {
         atomicMax(&counter[bucket], maxValueInGroup);
     }
