@@ -44,7 +44,9 @@
 /* Matrix size */
 #define N (275)
 
-/* Host implementation of a simple version of sgemm */
+/* Host implementation of a simple version of sgemm 
+*   C = alpha * A * B + beta * C
+*/
 static void simple_sgemm(int n, float alpha, const float *A, const float *B, float beta, float *C)
 {
     int i;
@@ -90,11 +92,9 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
-    /* Initialize CUBLAS */
+    /* Initialize CUBLAS handle */
     printf("simpleCUBLAS test running..\n");
-
     status = cublasCreate(&handle);
-
     if (status != CUBLAS_STATUS_SUCCESS) {
         fprintf(stderr, "!!!! CUBLAS initialization error\n");
         return EXIT_FAILURE;
@@ -167,11 +167,13 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
-    /* Performs operation using plain C code */
+    /* Performs sgemm using plain C code */
     simple_sgemm(N, alpha, h_A, h_B, beta, h_C);
     h_C_ref = h_C;
 
-    /* Performs operation using cublas */
+    /* Performs sgemm using cublas with the handle
+    *   C = alpha * A * B + beta * C
+    */
     status = cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, N, N, N, &alpha, d_A, N, d_B, N, &beta, d_C, N);
 
     if (status != CUBLAS_STATUS_SUCCESS) {
@@ -234,7 +236,7 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
-    /* Shutdown */
+    /* Shutdown the handle */
     status = cublasDestroy(handle);
 
     if (status != CUBLAS_STATUS_SUCCESS) {
