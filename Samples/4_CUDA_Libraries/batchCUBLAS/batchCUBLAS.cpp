@@ -413,7 +413,7 @@ int test_gemm_loop(struct gemmOpts &opts, float err, double max_relative_error, 
     int                           errors;
     double                        start, stop;
 
-    printf("Testing %cgemm\n", *opts.elem_type);
+    printf("\nTesting %cgemm\n", *opts.elem_type);
 
     matrixM = (opts.m) ? opts.m : BENCH_MATRIX_M;
     matrixN = (opts.n) ? opts.n : BENCH_MATRIX_N;
