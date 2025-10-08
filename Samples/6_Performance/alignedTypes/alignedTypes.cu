@@ -114,13 +114,13 @@ typedef struct __align__(16)
 // Common host and device functions
 ////////////////////////////////////////////////////////////////////////////////
 // Round a / b to nearest higher integer value
-int iDivUp(int a, int b) { return (a % b != 0) ? (a / b + 1) : (a / b); }
+int iDivUp(int a, int b) { return (a + b - 1) / b; }
 
 // Round a / b to nearest lower integer value
 int iDivDown(int a, int b) { return a / b; }
 
 // Align a to nearest higher multiple of b
-int iAlignUp(int a, int b) { return (a % b != 0) ? (a - a % b + b) : a; }
+int iAlignUp(int a, int b) { return (a + b - 1) / b * b; }
 
 // Align a to nearest lower multiple of b
 int iAlignDown(int a, int b) { return a - a % b; }
@@ -143,10 +143,9 @@ template <class TData> __global__ void testKernel(TData *d_odata, TData *d_idata
 ////////////////////////////////////////////////////////////////////////////////
 // Validation routine for simple copy kernel.
 // We must know "packed" size of TData (number_of_fields * sizeof(simple_type))
-// and compare only these "packed" parts of the structure,
-// containing actual user data. The compiler behavior with padding bytes
-// is undefined, since padding is merely a placeholder
-// and doesn't contain any user data.
+// and compare only these "packed" parts of the structure, containing actual user data. 
+// The compiler behavior with padding bytes
+// is undefined, since padding is merely a placeholder and doesn't contain any user data.
 ////////////////////////////////////////////////////////////////////////////////
 template <class TData> int testCPU(TData *h_odata, TData *h_idata, int numElements, int packedElementSize)
 {
@@ -183,6 +182,7 @@ template <class TData> int runTest(int packedElementSize, int memory_size)
 
     // Clean output buffer before current test
     checkCudaErrors(cudaMemset(d_odata, 0, memory_size));
+
     // Run test
     checkCudaErrors(cudaDeviceSynchronize());
     sdkResetTimer(&hTimer);
@@ -204,7 +204,7 @@ template <class TData> int runTest(int packedElementSize, int memory_size)
     checkCudaErrors(cudaMemcpy(h_odataGPU, d_odata, memory_size, cudaMemcpyDeviceToHost));
     int flag = testCPU((TData *)h_odataGPU, (TData *)h_idataCPU, numElements, packedElementSize);
 
-    printf(flag ? "\tTEST OK\n" : "\tTEST FAILURE\n");
+    printf(flag ? "TEST OK\n" : "TEST FAILURE\n");
 
     return !flag;
 }
@@ -240,62 +240,65 @@ int main(int argc, char **argv)
 
     sdkCreateTimer(&hTimer);
 
-    printf("Allocating memory...\n");
+    printf("\nAllocating memory...\n");
     h_idataCPU = (unsigned char *)malloc(MemorySize);
     h_odataGPU = (unsigned char *)malloc(MemorySize);
     checkCudaErrors(cudaMalloc((void **)&d_idata, MemorySize));
     checkCudaErrors(cudaMalloc((void **)&d_odata, MemorySize));
 
-    printf("Generating host input data array...\n");
+    printf("\nGenerating host input data array...\n");
 
     for (i = 0; i < MemorySize; i++) {
         h_idataCPU[i] = (i & 0xFF) + 1;
     }
 
-    printf("Uploading input data to GPU memory...\n");
+    printf("\nUploading input data to GPU memory...\n");
     checkCudaErrors(cudaMemcpy(d_idata, h_idataCPU, MemorySize, cudaMemcpyHostToDevice));
 
-    printf("Testing misaligned types...\n");
-    printf("uint8...\n");
+    printf("\nTesting misaligned types...\n");
+    
+    printf("\nuint8...\n");
     nTotalFailures += runTest<uint8>(1, MemorySize);
 
-    printf("uint16...\n");
+    printf("\nuint16...\n");
     nTotalFailures += runTest<uint16>(2, MemorySize);
 
-    printf("RGBA8_misaligned...\n");
+    printf("\nRGBA8_misaligned...\n");
     nTotalFailures += runTest<RGBA8_misaligned>(4, MemorySize);
 
-    printf("LA32_misaligned...\n");
+    printf("\nLA32_misaligned...\n");
     nTotalFailures += runTest<LA32_misaligned>(8, MemorySize);
 
-    printf("RGB32_misaligned...\n");
+    printf("\nRGB32_misaligned...\n");
     nTotalFailures += runTest<RGB32_misaligned>(12, MemorySize);
 
-    printf("RGBA32_misaligned...\n");
+    printf("\nRGBA32_misaligned...\n");
     nTotalFailures += runTest<RGBA32_misaligned>(16, MemorySize);
 
-    printf("Testing aligned types...\n");
-    printf("RGBA8...\n");
+    
+    printf("\nTesting aligned types...\n");
+    
+    printf("\nRGBA8...\n");
     nTotalFailures += runTest<RGBA8>(4, MemorySize);
 
-    printf("I32...\n");
+    printf("\nI32...\n");
     nTotalFailures += runTest<I32>(4, MemorySize);
 
-    printf("LA32...\n");
+    printf("\nLA32...\n");
     nTotalFailures += runTest<LA32>(8, MemorySize);
 
-    printf("RGB32...\n");
+    printf("\nRGB32...\n");
     nTotalFailures += runTest<RGB32>(12, MemorySize);
 
-    printf("RGBA32...\n");
+    printf("\nRGBA32...\n");
     nTotalFailures += runTest<RGBA32>(16, MemorySize);
 
-    printf("RGBA32_2...\n");
+    printf("\nRGBA32_2...\n");
     nTotalFailures += runTest<RGBA32_2>(32, MemorySize);
 
     printf("\n[alignedTypes] -> Test Results: %d Failures\n", nTotalFailures);
 
-    printf("Shutting down...\n");
+    printf("\nShutting down...\n");
     checkCudaErrors(cudaFree(d_idata));
     checkCudaErrors(cudaFree(d_odata));
     free(h_odataGPU);
@@ -304,10 +307,10 @@ int main(int argc, char **argv)
     sdkDeleteTimer(&hTimer);
 
     if (nTotalFailures != 0) {
-        printf("Test failed!\n");
+        printf("\nTest failed!\n");
         exit(EXIT_FAILURE);
     }
 
-    printf("Test passed\n");
+    printf("\nTest passed\n");
     exit(EXIT_SUCCESS);
 }
