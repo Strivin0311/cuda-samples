@@ -63,13 +63,12 @@ int MUL_FACTOR    = TILE_DIM;
 
 #define FLOOR(a, b) (a - (a % b))
 
-// Compute the tile size necessary to illustrate performance cases for SM20+
-// hardware
+// Compute the tile size necessary to illustrate performance cases for SM20+ hardware
 int MAX_TILES = (FLOOR(MATRIX_SIZE_X, 512) * FLOOR(MATRIX_SIZE_Y, 512)) / (TILE_DIM * TILE_DIM);
 
-// Number of repetitions used for timing.  Two sets of repetitions are
-// performed: 1) over kernel launches and 2) inside the kernel over just the
-// loads and stores
+// Number of repetitions used for timing.
+// Two sets of repetitions are performed: 
+// 1) over kernel launches and 2) inside the kernel over just the loads and stores
 
 #define NUM_REPS 100
 
@@ -90,11 +89,16 @@ __global__ void copy(float *odata, float *idata, int width, int height)
     }
 }
 
+// -------------------------------------------------------
+// Copies with shared memory
+// width and height must be integral multiples of TILE_DIM
+// -------------------------------------------------------
+
 __global__ void copySharedMem(float *odata, float *idata, int width, int height)
 {
     // Handle to thread block group
     cg::thread_block cta = cg::this_thread_block();
-    __shared__ float tile[TILE_DIM][TILE_DIM];
+    __shared__ float block[TILE_DIM][TILE_DIM];
 
     int xIndex = blockIdx.x * TILE_DIM + threadIdx.x;
     int yIndex = blockIdx.y * TILE_DIM + threadIdx.y;
@@ -103,7 +107,7 @@ __global__ void copySharedMem(float *odata, float *idata, int width, int height)
 
     for (int i = 0; i < TILE_DIM; i += BLOCK_ROWS) {
         if (xIndex < width && yIndex < height) {
-            tile[threadIdx.y + i][threadIdx.x] = idata[index + i * width];
+            block[threadIdx.y + i][threadIdx.x] = idata[index + i * width];
         }
     }
 
@@ -111,13 +115,13 @@ __global__ void copySharedMem(float *odata, float *idata, int width, int height)
 
     for (int i = 0; i < TILE_DIM; i += BLOCK_ROWS) {
         if (xIndex < height && yIndex < width) {
-            odata[index + i * width] = tile[threadIdx.y + i][threadIdx.x];
+            odata[index + i * width] = block[threadIdx.y + i][threadIdx.x];
         }
     }
 }
 
 // -------------------------------------------------------
-// Transposes
+// Naive Transposes
 // width and height must be integral multiples of TILE_DIM
 // -------------------------------------------------------
 
@@ -127,64 +131,72 @@ __global__ void transposeNaive(float *odata, float *idata, int width, int height
     int yIndex = blockIdx.y * TILE_DIM + threadIdx.y;
 
     int index_in  = xIndex + width * yIndex;
-    int index_out = yIndex + height * xIndex;
+    int index_out = yIndex + height * xIndex; // naive transpose
 
     for (int i = 0; i < TILE_DIM; i += BLOCK_ROWS) {
         odata[index_out + i] = idata[index_in + i * width];
     }
 }
 
-// coalesced transpose (with bank conflicts)
+// -------------------------------------------------------
+// Coalesced Transpose (with bank conflicts)
+// width and height must be integral multiples of TILE_DIM
+// -------------------------------------------------------
 
 __global__ void transposeCoalesced(float *odata, float *idata, int width, int height)
 {
     // Handle to thread block group
     cg::thread_block cta = cg::this_thread_block();
-    __shared__ float tile[TILE_DIM][TILE_DIM];
+    __shared__ float block[TILE_DIM][TILE_DIM];
 
     int xIndex   = blockIdx.x * TILE_DIM + threadIdx.x;
     int yIndex   = blockIdx.y * TILE_DIM + threadIdx.y;
-    int index_in = xIndex + (yIndex)*width;
+    int index_in = xIndex + yIndex * width;
 
     xIndex        = blockIdx.y * TILE_DIM + threadIdx.x;
     yIndex        = blockIdx.x * TILE_DIM + threadIdx.y;
-    int index_out = xIndex + (yIndex)*height;
+    int index_out = xIndex + yIndex * height;
 
     for (int i = 0; i < TILE_DIM; i += BLOCK_ROWS) {
-        tile[threadIdx.y + i][threadIdx.x] = idata[index_in + i * width];
+        block[threadIdx.y + i][threadIdx.x] = idata[index_in + i * width];
     }
 
     cg::sync(cta);
 
     for (int i = 0; i < TILE_DIM; i += BLOCK_ROWS) {
-        odata[index_out + i * height] = tile[threadIdx.x][threadIdx.y + i];
+        // (32-way) bank conflict here
+        // since threadIdx.x are not coalesced like the above loop
+        odata[index_out + i * height] = block[threadIdx.x][threadIdx.y + i];
     }
 }
 
-// Coalesced transpose with no bank conflicts
+// -------------------------------------------------------
+// Coalesced Transpose (w/o bank conflicts)
+// width and height must be integral multiples of TILE_DIM
+// -------------------------------------------------------
 
 __global__ void transposeNoBankConflicts(float *odata, float *idata, int width, int height)
 {
     // Handle to thread block group
     cg::thread_block cta = cg::this_thread_block();
-    __shared__ float tile[TILE_DIM][TILE_DIM + 1];
+    __shared__ float block[TILE_DIM][TILE_DIM + 1]; // skew 1 to avoid bank conflicts
 
     int xIndex   = blockIdx.x * TILE_DIM + threadIdx.x;
     int yIndex   = blockIdx.y * TILE_DIM + threadIdx.y;
-    int index_in = xIndex + (yIndex)*width;
+    int index_in = xIndex + yIndex * width;
 
     xIndex        = blockIdx.y * TILE_DIM + threadIdx.x;
     yIndex        = blockIdx.x * TILE_DIM + threadIdx.y;
-    int index_out = xIndex + (yIndex)*height;
+    int index_out = xIndex + yIndex * height;
 
     for (int i = 0; i < TILE_DIM; i += BLOCK_ROWS) {
-        tile[threadIdx.y + i][threadIdx.x] = idata[index_in + i * width];
+        block[threadIdx.y + i][threadIdx.x] = idata[index_in + i * width];
     }
 
     cg::sync(cta);
 
     for (int i = 0; i < TILE_DIM; i += BLOCK_ROWS) {
-        odata[index_out + i * height] = tile[threadIdx.x][threadIdx.y + i];
+        odata[index_out + i * height] = block[threadIdx.x][threadIdx.y + i];
     }
 }
 
@@ -204,7 +216,7 @@ __global__ void transposeDiagonal(float *odata, float *idata, int width, int hei
 {
     // Handle to thread block group
     cg::thread_block cta = cg::this_thread_block();
-    __shared__ float tile[TILE_DIM][TILE_DIM + 1];
+    __shared__ float block[TILE_DIM][TILE_DIM + 1];
 
     int blockIdx_x, blockIdx_y;
 
@@ -224,20 +236,20 @@ __global__ void transposeDiagonal(float *odata, float *idata, int width, int hei
 
     int xIndex   = blockIdx_x * TILE_DIM + threadIdx.x;
     int yIndex   = blockIdx_y * TILE_DIM + threadIdx.y;
-    int index_in = xIndex + (yIndex)*width;
+    int index_in = xIndex + yIndex * width;
 
     xIndex        = blockIdx_y * TILE_DIM + threadIdx.x;
     yIndex        = blockIdx_x * TILE_DIM + threadIdx.y;
-    int index_out = xIndex + (yIndex)*height;
+    int index_out = xIndex + yIndex * height;
 
     for (int i = 0; i < TILE_DIM; i += BLOCK_ROWS) {
-        tile[threadIdx.y + i][threadIdx.x] = idata[index_in + i * width];
+        block[threadIdx.y + i][threadIdx.x] = idata[index_in + i * width];
     }
 
     cg::sync(cta);
 
     for (int i = 0; i < TILE_DIM; i += BLOCK_ROWS) {
-        odata[index_out + i * height] = tile[threadIdx.x][threadIdx.y + i];
+        odata[index_out + i * height] = block[threadIdx.x][threadIdx.y + i];
     }
 }
 
@@ -258,7 +270,7 @@ __global__ void transposeFineGrained(float *odata, float *idata, int width, int 
 
     int xIndex = blockIdx.x * TILE_DIM + threadIdx.x;
     int yIndex = blockIdx.y * TILE_DIM + threadIdx.y;
-    int index  = xIndex + (yIndex)*width;
+    int index  = xIndex + yIndex * width;
 
     for (int i = 0; i < TILE_DIM; i += BLOCK_ROWS) {
         block[threadIdx.y + i][threadIdx.x] = idata[index + i * width];
@@ -275,15 +287,15 @@ __global__ void transposeCoarseGrained(float *odata, float *idata, int width, in
 {
     // Handle to thread block group
     cg::thread_block cta = cg::this_thread_block();
-    __shared__ float block[TILE_DIM][TILE_DIM + 1];
+    __shared__ float block[TILE_DIM][TILE_DIM + 1]; // skew 1 to avoid bank conflicts
 
     int xIndex   = blockIdx.x * TILE_DIM + threadIdx.x;
     int yIndex   = blockIdx.y * TILE_DIM + threadIdx.y;
-    int index_in = xIndex + (yIndex)*width;
+    int index_in = xIndex + yIndex * width;
 
     xIndex        = blockIdx.y * TILE_DIM + threadIdx.x;
     yIndex        = blockIdx.x * TILE_DIM + threadIdx.y;
-    int index_out = xIndex + (yIndex)*height;
+    int index_out = xIndex + yIndex * height;
 
     for (int i = 0; i < TILE_DIM; i += BLOCK_ROWS) {
         block[threadIdx.y + i][threadIdx.x] = idata[index_in + i * width];
@@ -383,8 +395,7 @@ int main(int argc, char **argv)
     printf("> Device %d: \"%s\"\n", devID, deviceProp.name);
     printf("> SM Capability %d.%d detected:\n", deviceProp.major, deviceProp.minor);
 
-    // Calculate number of tiles we will run for the Matrix Transpose performance
-    // tests
+    // Calculate number of tiles we will run for the Matrix Transpose performance tests
     int size_x, size_y, max_matrix_dim, matrix_size_test;
 
     matrix_size_test = 512; // we round down max_matrix_dim for this perf test
@@ -397,7 +408,7 @@ int main(int argc, char **argv)
         max_matrix_dim = matrix_size_test;
     }
 
-    printf("> [%s] has %d MP(s) x %d (Cores/MP) = %d (Cores)\n",
+    printf("> [%s] has %d MP(s) x %d (Cuda Cores/MP) = %d (Cores)\n",
            deviceProp.name,
            deviceProp.multiProcessorCount,
            _ConvertSMVer2Cores(deviceProp.major, deviceProp.minor),
@@ -405,8 +416,8 @@ int main(int argc, char **argv)
 
     printf("> Compute performance scaling factor = %4.2f\n", scale_factor);
 
-    // Extract parameters if there are any, command line -dimx and -dimy can
-    // override any of these settings
+    // Extract parameters if there are any, 
+    // command line -dimx and -dimy can override any of these settings
     getParams(argc, argv, deviceProp, size_x, size_y, max_matrix_dim);
 
     if (size_x != size_y) {
@@ -498,42 +509,42 @@ int main(int argc, char **argv)
         switch (k) {
         case 0:
             kernel     = &copy;
-            kernelName = "simple copy       ";
+            kernelName = "simple copy                  ";
             break;
 
         case 1:
             kernel     = &copySharedMem;
-            kernelName = "shared memory copy";
+            kernelName = "shared memory copy           ";
             break;
 
         case 2:
             kernel     = &transposeNaive;
-            kernelName = "naive             ";
+            kernelName = "naive                        ";
             break;
 
         case 3:
             kernel     = &transposeCoalesced;
-            kernelName = "coalesced         ";
+            kernelName = "coalesced with bank conflicts";
             break;
 
         case 4:
             kernel     = &transposeNoBankConflicts;
-            kernelName = "optimized         ";
+            kernelName = "coalesced w/o bank conflicts ";
             break;
 
         case 5:
             kernel     = &transposeCoarseGrained;
-            kernelName = "coarse-grained    ";
+            kernelName = "coarse-grained               ";
             break;
 
         case 6:
             kernel     = &transposeFineGrained;
-            kernelName = "fine-grained      ";
+            kernelName = "fine-grained                 ";
             break;
 
         case 7:
             kernel     = &transposeDiagonal;
-            kernelName = "diagonal          ";
+            kernelName = "diagonal                     ";
             break;
         }
 
