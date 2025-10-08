@@ -154,14 +154,15 @@
 
 // The macro below is used to shift rows of the A matrix and columns of the B matrix
 // in shared memory to minimize possible bank conflicts.
-// Before performing the nvcuda::wmma::mma_sync operation, the warp must load the matrix
-// data using the nvcuda::wmma::load_matrix_sync operation. Although the memory access pattern
-// is not specified for that function, each lane in the warp can read one or multiple matrix
-// elements from different matrix rows or columns.
-// For shared memory, such access can result in bank conflicts if different rows / columns
-// of the matrix map to the same bank. By shifting each row and column by a few bytes, we
-// make sure that they map to different banks, thus reducing the number of possible bank
-// conflicts.
+// Before performing the nvcuda::wmma::mma_sync operation, 
+// the warp must load the matrix data using the nvcuda::wmma::load_matrix_sync operation. 
+// Although the memory access pattern is not specified for that function, 
+// each lane in the warp can read one or multiple matrix elements from different matrix rows or columns.
+//
+// For shared memory, such access can result in bank conflicts if different rows / columns of the matrix map to the same bank. 
+// By shifting each row and column by a few bytes, we make sure that they map to different banks, 
+// thus reducing the number of possible bank conflicts.
+//
 // The number of 4 eight-byte "double" elements is chosen as the minimum possible shift because
 // we must keep each row and column 256-bit aligned, as required by nvcuda::wmma::load_matrix_sync.
 #define SKEW_DOUBLE 4
