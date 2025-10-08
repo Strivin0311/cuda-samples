@@ -280,8 +280,8 @@ void runMatrixMultiplyKernel(unsigned int matrixDim,
     checkCudaErrors(cudaMallocHost(&latch, sizeof(unsigned int)));
 
     switch (allocType) {
-    case USE_HOST_PAGEABLE_AND_DEVICE_MEMORY:
-    case USE_HOST_PAGEABLE_AND_DEVICE_MEMORY_ASYNC:
+    case USE_HOST_PAGEABLE_AND_DEVICE_MEMORY: // pageable memory
+    case USE_HOST_PAGEABLE_AND_DEVICE_MEMORY_ASYNC: // pageable memory
         hptrA = (float *)malloc(size);
         if (!hptrA) {
             exit(EXIT_FAILURE); // exit since memory allocation error
@@ -300,8 +300,8 @@ void runMatrixMultiplyKernel(unsigned int matrixDim,
         copyRequired = true;
         break;
 
-    case USE_HOST_PAGELOCKED_AND_DEVICE_MEMORY:
-    case USE_HOST_PAGELOCKED_AND_DEVICE_MEMORY_ASYNC:
+    case USE_HOST_PAGELOCKED_AND_DEVICE_MEMORY: // page-locked memory
+    case USE_HOST_PAGELOCKED_AND_DEVICE_MEMORY_ASYNC: // page-locked memory
         checkCudaErrors(cudaMallocHost(&hptrA, size));
         checkCudaErrors(cudaMallocHost(&hptrB, size));
         checkCudaErrors(cudaMallocHost(&hptrC, size));
@@ -311,7 +311,7 @@ void runMatrixMultiplyKernel(unsigned int matrixDim,
         copyRequired = true;
         break;
 
-    case USE_ZERO_COPY:
+    case USE_ZERO_COPY: // page-locked memory
         checkCudaErrors(cudaMallocHost(&hptrA, size));
         checkCudaErrors(cudaMallocHost(&hptrB, size));
         checkCudaErrors(cudaMallocHost(&hptrC, size));
@@ -320,7 +320,7 @@ void runMatrixMultiplyKernel(unsigned int matrixDim,
         checkCudaErrors(cudaHostGetDevicePointer(&dptrC, hptrC, 0));
         break;
 
-    case USE_MANAGED_MEMORY:
+    case USE_MANAGED_MEMORY: // unified memory
         checkCudaErrors(cudaMallocManaged(&dptrA, size));
         checkCudaErrors(cudaMallocManaged(&dptrB, size));
         checkCudaErrors(cudaMallocManaged(&dptrC, size));
@@ -394,6 +394,9 @@ void runMatrixMultiplyKernel(unsigned int matrixDim,
             sdkStartTimer(&gpuTransferCallsTimer);
             if (copyRequired) {
                 if (isAsync) {
+                    // if hptr is pageable, we can still use `cudaMemcpyAsync` API,
+                    // but the CPU will still be stuck in the first step: copy the hptr to the pinned buffer
+                    // though this function itself will return immediately
                     checkCudaErrors(cudaMemcpyAsync(dptrA, hptrA, size, cudaMemcpyHostToDevice, streamToRunOn));
                     checkCudaErrors(cudaMemcpyAsync(dptrB, hptrB, size, cudaMemcpyHostToDevice, streamToRunOn));
                 }
@@ -407,11 +410,16 @@ void runMatrixMultiplyKernel(unsigned int matrixDim,
                     cudaMemLocation deviceLoc;
                     deviceLoc.type = cudaMemLocationTypeDevice;
                     deviceLoc.id   = device_id;
+                    // move the unified memory dptr to device indicated by `deviceLoc` in advance on the given stream
+                    // where the dptr is supposed to be allocated by `cudaMallocManaged`
                     checkCudaErrors(cudaMemPrefetchAsync(dptrA, size, deviceLoc, 0, streamToRunOn));
                     checkCudaErrors(cudaMemPrefetchAsync(dptrB, size, deviceLoc, 0, streamToRunOn));
                     checkCudaErrors(cudaMemPrefetchAsync(dptrC, size, deviceLoc, 0, streamToRunOn));
                 }
                 else {
+                    // attach the unified memory dptr to device on the given dummy stream
+                    // but actuall can be seen by any stream on any device, due to the flag `cudaMemAttachGlobal`
+                    // where the dptr is supposed to be allocated by `cudaMallocManaged`
                     checkCudaErrors(cudaStreamAttachMemAsync(streamToRunOn, dptrA, 0, cudaMemAttachGlobal));
                     checkCudaErrors(cudaStreamAttachMemAsync(streamToRunOn, dptrB, 0, cudaMemAttachGlobal));
                     checkCudaErrors(cudaStreamAttachMemAsync(streamToRunOn, dptrC, 0, cudaMemAttachGlobal));
@@ -444,11 +452,16 @@ void runMatrixMultiplyKernel(unsigned int matrixDim,
                 if (deviceProp.concurrentManagedAccess) {
                     cudaMemLocation hostLoc;
                     hostLoc.type = cudaMemLocationTypeHost;
+                    // move the unified memory dptr to host indicated by `hostLoc` in advance on the given stream
+                    // where the dptr is supposed to be allocated by `cudaMallocManaged`
                     checkCudaErrors(cudaMemPrefetchAsync(dptrA, size, hostLoc, 0));
                     checkCudaErrors(cudaMemPrefetchAsync(dptrB, size, hostLoc, 0));
                     checkCudaErrors(cudaMemPrefetchAsync(dptrC, size, hostLoc, 0));
                 }
                 else {
+                    // attach the unified memory dptr to only host on the given dummy stream
+                    // due to the flag `cudaMemAttachHost`
+                    // where the dptr is supposed to be allocated by `cudaMallocManaged`
                     checkCudaErrors(cudaStreamAttachMemAsync(streamToRunOn, dptrA, 0, cudaMemAttachHost));
                     checkCudaErrors(cudaStreamAttachMemAsync(streamToRunOn, dptrB, 0, cudaMemAttachHost));
                     checkCudaErrors(cudaStreamAttachMemAsync(streamToRunOn, dptrC, 0, cudaMemAttachHost));

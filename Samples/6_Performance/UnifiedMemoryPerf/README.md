@@ -2,7 +2,7 @@
 
 ## Description
 
-This sample demonstrates the performance comparision using matrix multiplication kernel of Unified Memory with/without hints and other types of memory like zero copy buffers, pageable, pagelocked memory performing synchronous and Asynchronous transfers on a single GPU.
+This sample demonstrates the performance comparision using matrix multiplication kernel of Unified Memory with/without hints and other types of memory like zero copy buffers, pageable, pagelocked memory performing either synchronous or asynchronous transfers on a single GPU.
 
 ## Key Concepts
 
