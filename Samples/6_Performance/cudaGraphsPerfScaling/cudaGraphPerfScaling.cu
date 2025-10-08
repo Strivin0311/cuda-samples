@@ -56,6 +56,7 @@ float getAsyncMicroSecondDuration(cudaEvent_t start, cudaEvent_t end)
 }
 
 #ifdef USE_NVTX
+#include <cuda_profiler_api.h>
 #include <nvtx3/nvToolsExt.h>
 
 class Tracer
@@ -64,9 +65,29 @@ public:
     Tracer(const char *name) { nvtxRangePushA(name); }
     ~Tracer() { nvtxRangePop(); }
 };
-#define RANGE(name)      Tracer uniq_name_using_macros(name);
-#define RANGE_PUSH(name) nvtxRangePushA(name)
-#define RANGE_POP()      nvtxRangePop();
+
+#define RANGE(name) \
+    do {            \
+        Tracer uniq_name_using_macros(name); \
+    } while (0)
+
+#define RANGE_PUSH(name) \
+    do {                 \
+        nvtxRangePushA(name); \
+    } while (0)
+#define RANGE_POP() \
+    do { \
+        nvtxRangePop(); \
+    } while (0)
+
+#define PROFILE_START() \
+    do {                \
+        cudaProfilerStart(); \
+    } while (0)
+#define PROFILE_STOP() \
+    do {               \
+        cudaProfilerStop(); \
+    } while (0)
 #else
 #define RANGE(name)
 #endif
@@ -363,6 +384,8 @@ int main(int argc, char **argv)
     cudaEventCreate(&timingEvent[0], 0);
     cudaEventCreate(&timingEvent[1], 0);
 
+    PROFILE_START();
+
     {
         RANGE("warmup");
         for (int i = 0; i < width; i++) {
@@ -430,6 +453,8 @@ int main(int argc, char **argv)
 
         length += stride;
     }
+
+    PROFILE_STOP();
 
     cudaFreeHost(hostData);
 
