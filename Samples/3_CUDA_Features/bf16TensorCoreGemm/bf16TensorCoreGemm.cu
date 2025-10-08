@@ -112,6 +112,8 @@
 
 #define C_LAYOUT wmma::mem_row_major
 
+typedef int4 copy_t;
+
 // Implementation constants.
 
 #define WARPS_PER_BLOCK   8
@@ -133,7 +135,7 @@
 #endif
 
 #define CHUNK_LINE_BYTES          (CHUNK_K * K * sizeof(__nv_bfloat16))
-#define WARP_COPY_BYTES           (WARP_SIZE * sizeof(int4)) // use warp-level vectorized copies
+#define WARP_COPY_BYTES           (WARP_SIZE * sizeof(copy_t)) // use warp-level vectorized copies
 #define CHUNK_COPY_LINES_PER_WARP (WARP_COPY_BYTES / CHUNK_LINE_BYTES)
 #define CHUNK_COPY_LINE_LANES     (WARP_SIZE / CHUNK_COPY_LINES_PER_WARP)
 
@@ -212,16 +214,21 @@ __global__ void compute_bf16gemm(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
     extern __shared__ __nv_bfloat16 shmem[][CHUNK_K * K + SKEW_BF16]; // skew 16 __nv_bfloat16 to avoid bank conflict and align to 256-bit
 
     // Warp and lane identification.
+    const auto numWarpsPerMat = WARPS_PER_BLOCK / 2;
     const unsigned int warpId = threadIdx.x / WARP_SIZE;
     const unsigned int laneId = threadIdx.x % WARP_SIZE;
-    const unsigned int rowWarpId = warpId / BLOCK_ROW_WARPS, colWarpId = warpId % BLOCK_ROW_WARPS;
+    const unsigned int warpGroupId = warpId / BLOCK_ROW_WARPS;
+    const unsigned int warpIdInGroup = warpId % BLOCK_ROW_WARPS;
+    const unsigned int warpIdInMatGroup = warpId % numWarpsPerMat;
+    const auto isWarpForMatA = warpId < numWarpsPerMat;
 
     // Offset in shared memory from which the B matrix is stored.
     const size_t shmem_idx_b_off = BLOCK_COL_TILES * M;
 
     // This pointer is used to access the C and D matrix tiles this warp computes.
-    float *shmem_warp_tile_ptr = (float *)&shmem[0][0] + rowWarpId * BLOCK_ROW_WARPS * SHMEM_STRIDE * N
-                               + colWarpId * SHMEM_OFFSET;
+    float *shmem_warp_tile_ptr = (float *)&shmem[0][0] 
+                                + warpGroupId * SHMEM_STRIDE * N * BLOCK_ROW_WARPS
+                                + warpIdInGroup * SHMEM_OFFSET;
 
     // This pointer is used to stream the C and D matrices block-wide tile to and from shared memory.
     float *shmem_warp_stream_ptr = (float *)&shmem[0][0] + warpId * SHMEM_STRIDE * N;
@@ -247,11 +254,13 @@ __global__ void compute_bf16gemm(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
         const size_t gmem_idx                 = (block_tile_i + warpId) * M * GLOBAL_MEM_STRIDE + block_tile_j * N;
         const float *src_gmem_warp_stream_ptr = &C[gmem_idx];
 
+        /********** Load C from global memory to shared memory ***********/
+
         // Stream multiple C tiles to shared memory.
 #pragma unroll
         for (int i = 0; i < N; i++) {
-            *((int4 *)(shmem_warp_stream_ptr + SHMEM_STRIDE * i) + laneId) =
-                *((int4 *)(src_gmem_warp_stream_ptr + GLOBAL_MEM_STRIDE * i) + laneId);
+            *((copy_t *)(shmem_warp_stream_ptr + SHMEM_STRIDE * i) + laneId) =
+                *((copy_t *)(src_gmem_warp_stream_ptr + GLOBAL_MEM_STRIDE * i) + laneId);
         }
 
         __syncthreads();
@@ -259,6 +268,8 @@ __global__ void compute_bf16gemm(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
         // These fragments will accumulate the result of A and B matrix fragment multiplications
         // along the K_GLOBAL dimension.
         wmma::fragment<wmma::accumulator, M, N, K, float> c[WARP_COL_TILES][WARP_ROW_TILES];
+
+        /********** Load C from shared memory to fragments ***********/
 
         // Load the C matrix tiles into fragments from shared memory.
 #pragma unroll
@@ -272,6 +283,8 @@ __global__ void compute_bf16gemm(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
         }
 
         __syncthreads();
+
+        /********** Scale C by beta/alpha ***********/
 
         // Scale the C matrix.
 #pragma unroll
@@ -287,19 +300,23 @@ __global__ void compute_bf16gemm(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
 
         // Select what warp copies what matrix to shared memory.
         // Warps 0-3 copy the A matrix, warps 4-7 copy the B matrix.
-        const __nv_bfloat16 *warp_ptr =
-            (warpId < (WARPS_PER_BLOCK / 2))
-                ? (&A[block_tile_i * M * K_GLOBAL] + M * K_GLOBAL * (warpId % (WARPS_PER_BLOCK / 2)) * 2)
-                : (&B[block_tile_j * N * K_GLOBAL] + N * K_GLOBAL * (warpId % (WARPS_PER_BLOCK / 2)) * 2);
+        const __nv_bfloat16 *warp_ptr = isWarpForMatA
+                                        ? (&A[block_tile_i * M * K_GLOBAL] + M * K_GLOBAL * warpIdInMatGroup * 2)
+                                        : (&B[block_tile_j * N * K_GLOBAL] + N * K_GLOBAL * warpIdInMatGroup * 2);
+
+        /********** Apply GEMM for each chunk of K tiles ***********/
 
         // Go through the global K dimension by a fixed step at a time.
 #pragma unroll
         for (int tile_k = 0; tile_k < K_TILES; tile_k += CHUNK_K) {
+
+            /********** Load A,B from global memory to shared memory ***********/
+
             // Copy slices of the A and B matrices to shared memory.
             // The first half of the warps in the CTA copy the A matrix, the rest copy the B matrix.
-            size_t shmem_idx = warpId < (WARPS_PER_BLOCK / 2)
-                                 ? (M * (warpId % (WARPS_PER_BLOCK / 2)) * 2)
-                                 : (N * (warpId % (WARPS_PER_BLOCK / 2)) * 2 + shmem_idx_b_off);
+            size_t shmem_idx = isWarpForMatA
+                                 ? (M * warpIdInMatGroup * 2)
+                                 : (N * warpIdInMatGroup * 2 + shmem_idx_b_off);
 
             // First half of the warp copies the first row / column of the matrix,
             // the second half of the warp copies the next.
@@ -311,8 +328,8 @@ __global__ void compute_bf16gemm(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
 #pragma unroll
             for (int i = 0; i < ((WARP_SIZE / 2) / CHUNK_COPY_LINES_PER_WARP) * 2; i++) {
                 // Copy 16 bytes at once in each lane.
-                *((int4 *)&shmem[shmem_idx][0] + (laneId % CHUNK_COPY_LINE_LANES)) =
-                    *((int4 *)lane_ptr + (laneId % CHUNK_COPY_LINE_LANES));
+                *((copy_t *)&shmem[shmem_idx][0] + (laneId % CHUNK_COPY_LINE_LANES)) =
+                    *((copy_t *)lane_ptr + (laneId % CHUNK_COPY_LINE_LANES));
 
                 // Advance the global memory pointer and the shared memory index.
                 lane_ptr = lane_ptr + K_GLOBAL * CHUNK_COPY_LINES_PER_WARP;
@@ -320,6 +337,8 @@ __global__ void compute_bf16gemm(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
             }
 
             __syncthreads();
+
+            /********** Accumulate A * B + C into C's shared memory ***********/
 
             // Compute a grid of C matrix tiles in each warp.
 #pragma unroll
@@ -329,10 +348,14 @@ __global__ void compute_bf16gemm(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
 
 #pragma unroll
                 for (int i = 0; i < WARP_COL_TILES; i++) {
-                    size_t               shmem_idx_a = rowWarpId * M * BLOCK_ROW_WARPS + (i * M);
+                    size_t               shmem_idx_a = warpGroupId * M * BLOCK_ROW_WARPS + (i * M);
                     const __nv_bfloat16 *tile_ptr    = &shmem[shmem_idx_a][k_step * K];
 
+                    /********** Load A from shared memory to fragments ***********/
+
                     wmma::load_matrix_sync(a[i], tile_ptr, K * CHUNK_K + SKEW_BF16);
+
+                    /********** Load B from shared memory to fragments ***********/
 
 #pragma unroll
                     for (int j = 0; j < WARP_ROW_TILES; j++) {
@@ -345,6 +368,8 @@ __global__ void compute_bf16gemm(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
                             wmma::load_matrix_sync(b[j], tile_ptr, K * CHUNK_K + SKEW_BF16);
                         }
 
+                        /********** Perform C += A * B + C ***********/
+
                         wmma::mma_sync(c[i][j], a[i], b[j], c[i][j]);
                     }
                 }
@@ -353,9 +378,14 @@ __global__ void compute_bf16gemm(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
             __syncthreads();
         }
 
+        /********** Scale C and Store D from fragments to shared memory to global memory ***********/
+
         // Store the D fragments to shared memory.
 #pragma unroll
         for (int i = 0; i < WARP_COL_TILES; i++) {
+        
+        /********** Scale C by alpha ***********/
+
 #pragma unroll
             for (int j = 0; j < WARP_ROW_TILES; j++) {
 #pragma unroll
@@ -366,11 +396,15 @@ __global__ void compute_bf16gemm(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
 
                 float *tile_ptr = shmem_warp_tile_ptr + i * SHMEM_STRIDE * K + j * N;
 
+                /********** Store C from fragments to shared memory ***********/
+
                 wmma::store_matrix_sync(tile_ptr, c[i][j], SHMEM_STRIDE, C_LAYOUT);
             }
         }
 
         __syncthreads();
+
+        /********** Store D from shared memory to global memory ***********/
 
         // Now that shared memory contains all the D tiles, stream them to global memory.
         float *dst_gmem_warp_stream_ptr = &D[gmem_idx];
@@ -574,8 +608,8 @@ __global__ void compute_bf16gemm_async_copy(const __nv_bfloat16 *A,
 
 #pragma unroll
         for (int i = 0; i < N; i++) {
-            *((int4 *)(dst_gmem_warp_stream_ptr + GLOBAL_MEM_STRIDE * i) + laneId) =
-                *((int4 *)(shmem_warp_stream_ptr + SHMEM_STRIDE * i) + laneId);
+            *((copy_t *)(dst_gmem_warp_stream_ptr + GLOBAL_MEM_STRIDE * i) + laneId) =
+                *((copy_t *)(shmem_warp_stream_ptr + SHMEM_STRIDE * i) + laneId);
         }
 
         __syncthreads();
