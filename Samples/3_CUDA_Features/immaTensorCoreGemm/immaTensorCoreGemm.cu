@@ -340,7 +340,7 @@ __global__ void compute_gemm_imma(const uint8_t *A, const uint8_t *B, const int 
 
             /********** Accumulate A * B + C into C's shared memory ***********/
 
-            // Compute a grid of C matrix tiles in each warp.
+// Compute a grid of C matrix tiles in each warp.
 #pragma unroll
             for (int k_step = 0; k_step < CHUNK_K; k_step++) {
                 wmma::fragment<wmma::matrix_a, M, N, K, uint8_t, wmma::row_major> a[WARP_COL_TILES];
@@ -380,7 +380,7 @@ __global__ void compute_gemm_imma(const uint8_t *A, const uint8_t *B, const int 
 
         /********** Scale C and Store D from fragments to shared memory to global memory ***********/
 
-        // Store the D fragments to shared memory.
+// Store the D fragments to shared memory.
 #pragma unroll
         for (int i = 0; i < WARP_COL_TILES; i++) {
         

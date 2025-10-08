@@ -333,7 +333,7 @@ __global__ void compute_gemm(const half *A, const half *B, const float *C, float
 
             /********** Accumulate A * B + C into C's shared memory ***********/
 
-            // Compute a grid of C matrix tiles in each warp.
+// Compute a grid of C matrix tiles in each warp.
 #pragma unroll
             for (int k_step = 0; k_step < CHUNK_K; k_step++) {
                 wmma::fragment<wmma::matrix_a, M, N, K, half, wmma::row_major> a[WARP_COL_TILES];

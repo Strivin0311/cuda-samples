@@ -340,7 +340,7 @@ __global__ void compute_bf16gemm(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
 
             /********** Accumulate A * B + C into C's shared memory ***********/
 
-            // Compute a grid of C matrix tiles in each warp.
+// Compute a grid of C matrix tiles in each warp.
 #pragma unroll
             for (int k_step = 0; k_step < CHUNK_K; k_step++) {
                 wmma::fragment<wmma::matrix_a, M, N, K, __nv_bfloat16, wmma::row_major> a[WARP_COL_TILES];
@@ -380,7 +380,7 @@ __global__ void compute_bf16gemm(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
 
         /********** Scale C and Store D from fragments to shared memory to global memory ***********/
 
-        // Store the D fragments to shared memory.
+// Store the D fragments to shared memory.
 #pragma unroll
         for (int i = 0; i < WARP_COL_TILES; i++) {
         
@@ -468,9 +468,8 @@ __global__ void compute_bf16gemm_async_copy(const __nv_bfloat16 *A,
         const unsigned int block_tile_j = (block_pos * BLOCK_COL_TILES) % N_TILES;
 
         // Stop when there are no more D matrix tiles to compute in this CTA.
-        if (block_tile_i >= M_TILES) {
+        if (block_tile_i >= M_TILES)
             break;
-        }
 
         // This warp's pointer to the C matrix data to copy memory from to shared memory.
         const size_t gmem_idx                 = (block_tile_i + warpId) * M * GLOBAL_MEM_STRIDE + block_tile_j * N;
@@ -537,7 +536,7 @@ __global__ void compute_bf16gemm_async_copy(const __nv_bfloat16 *A,
 
         /********** Apply GEMM for each chunk of K tiles ***********/
 
-        // Go through the global K dimension by a fixed step at a time.
+// Go through the global K dimension by a fixed step at a time.
 #pragma unroll
         for (int tile_k = 0; tile_k < K_TILES; tile_k += CHUNK_K) {
             
@@ -570,7 +569,7 @@ __global__ void compute_bf16gemm_async_copy(const __nv_bfloat16 *A,
 
             /********** Accumulate A * B + C into C's shared memory ***********/
 
-            // Compute a grid of C matrix tiles in each warp.
+// Compute a grid of C matrix tiles in each warp.
 #pragma unroll
             for (int k_step = 0; k_step < CHUNK_K; k_step++) {
                 wmma::fragment<wmma::matrix_a, M, N, K, __nv_bfloat16, wmma::row_major> a[WARP_COL_TILES];
@@ -611,7 +610,7 @@ __global__ void compute_bf16gemm_async_copy(const __nv_bfloat16 *A,
 
         /********** Scale C and Store D from fragments to shared memory to global memory ***********/
 
-        // Store the D fragments to shared memory.
+// Store the D fragments to shared memory.
 #pragma unroll
         for (int i = 0; i < WARP_COL_TILES; i++) {
 
