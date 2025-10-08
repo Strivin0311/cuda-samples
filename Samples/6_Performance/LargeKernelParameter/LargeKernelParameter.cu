@@ -57,6 +57,8 @@ typedef struct
 } param_large_t;
 
 // Kernel with 4KB kernel parameter limit
+// `__grid_constant__` indicates that `p` is constant in the whole kernel lifetime, thus can be stored in constant memory if possible
+// `const` indicates that `p` is read-only, but still in the global memory
 __global__ void kernelDefault(__grid_constant__ const param_t p, int *result)
 {
     int tmp = 0;
@@ -74,7 +76,9 @@ __global__ void kernelDefault(__grid_constant__ const param_t p, int *result)
     *result = tmp;
 }
 
-// Kernel with 32,764 byte kernel parameter limit
+// Kernel with 32KB kernel parameter limit
+// `__grid_constant__` indicates that `p` is constant in the whole kernel lifetime, thus can be stored in constant memory if possible
+// `const` indicates that `p` is read-only, but still in the global memory
 __global__ void kernelLargeParam(__grid_constant__ const param_large_t p, int *result)
 {
     int tmp = 0;
@@ -128,6 +132,8 @@ int main()
 
     // warmup, verify correctness
     checkCudaErrors(
+        // excess_params is constant memory in GPU, represented by __constant__
+        // thus we have to use `cudaMemcpyToSymbol`
         cudaMemcpyToSymbol(excess_params, copied_params, CONST_COPIED_PARAMS * sizeof(int), 0, cudaMemcpyHostToDevice));
     kernelDefault<<<1, 1>>>(p, d_result);
     checkCudaErrors(cudaMemcpy(&h_result, d_result, sizeof(int), cudaMemcpyDeviceToHost));
@@ -147,17 +153,19 @@ int main()
         goto Exit;
     }
 
-    // benchmark default kernel parameter limit
     {
+        // benchmark default kernel parameter limit
         auto start = steady_clock::now();
         for (int i = 0; i < TEST_ITERATIONS; ++i) {
+            // excess_params is constant memory in GPU, represented by __constant__
+            // thus we have to use `cudaMemcpyToSymbol`
             checkCudaErrors(cudaMemcpyToSymbol(
                 excess_params, copied_params, CONST_COPIED_PARAMS * sizeof(int), 0, cudaMemcpyHostToDevice));
             kernelDefault<<<1, 1>>>(p, d_result);
         }
         checkCudaErrors(cudaDeviceSynchronize());
         auto end = steady_clock::now();
-        std::cout << "Kernel 4KB parameter limit - time (us):";
+        std::cout << "Kernel 4KB parameter limit - time (us): ";
         report_time(start, end, TEST_ITERATIONS);
 
         // benchmark large kernel parameter limit
@@ -167,7 +175,7 @@ int main()
         }
         checkCudaErrors(cudaDeviceSynchronize());
         end = steady_clock::now();
-        std::cout << "Kernel 32,764 byte parameter limit - time (us):";
+        std::cout << "Kernel 32KB parameter limit - time (us): ";
         report_time(start, end, TEST_ITERATIONS);
     }
     std::cout << "Test passed!" << std::endl;
