@@ -228,7 +228,7 @@ __global__ void compute_gemm(const half *A, const half *B, const float *C, float
                                     + warpIdInGroup * SHMEM_OFFSET;
 
     // This pointer is used to stream the C and D matrices block-wide tile to and from shared memory.
-    float *shmem_warp_stream_ptr = (float *)&shmem[0][0] + warpId * SHMEM_STRIDE * K;
+    float *shmem_warp_stream_ptr = (float *)&shmem[0][0] + warpId * SHMEM_STRIDE * N;
 
     // Adjust the beta scaler, as it'll be multiplied by alpha at the end of
     // each tile computation. Technically this is not generally correct (may
