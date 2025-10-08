@@ -215,7 +215,7 @@ __host__ void init_host_matrices(double *a, double *b, double *c)
 __global__ void compute_dgemm(const double *A, const double *B, const double *C, double *D, double alpha, double beta)
 {
 #if __CUDA_ARCH__ >= 800
-    extern __shared__ double shmem[][CHUNK_K * K + SKEW_DOUBLE];
+    extern __shared__ double shmem[][CHUNK_K * K + SKEW_DOUBLE]; // skew 4 double to avoid bank conflict and align to 256-bit
 
     // Warp and lane identification.
     const unsigned int warpId = threadIdx.x / WARP_SIZE;

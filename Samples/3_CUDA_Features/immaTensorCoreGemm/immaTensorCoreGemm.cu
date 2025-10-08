@@ -208,7 +208,7 @@ __host__ void init_host_matrices(uint8_t *a, uint8_t *b, int *c)
 
 __global__ void compute_gemm_imma(const uint8_t *A, const uint8_t *B, const int *C, int *D, int alpha, int beta)
 {
-    extern __shared__ uint8_t shmem[][CHUNK_K * K + SKEW_UINT8];
+    extern __shared__ uint8_t shmem[][CHUNK_K * K + SKEW_UINT8]; // skew 32 uint8 to avoid bank conflict and align to 256-bit
 
     // Warp and lane identification.
     const unsigned int warpId = threadIdx.x / WARP_SIZE;

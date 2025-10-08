@@ -205,7 +205,7 @@ __host__ void init_host_matrices(half *a, half *b, float *c)
 
 __global__ void compute_gemm(const half *A, const half *B, const float *C, float *D, float alpha, float beta)
 {
-    extern __shared__ half shmem[][CHUNK_K * K + SKEW_HALF];
+    extern __shared__ half shmem[][CHUNK_K * K + SKEW_HALF]; // skew 16 half to avoid bank conflict and align to 256-bit
 
     // Warp and lane identification.
     const unsigned int warpId = threadIdx.x / WARP_SIZE;

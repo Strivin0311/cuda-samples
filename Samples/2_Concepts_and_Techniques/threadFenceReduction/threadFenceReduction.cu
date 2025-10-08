@@ -327,10 +327,14 @@ void shmoo(int minN, int maxN, int maxThreads, int maxBlocks)
     sdkCreateTimer(&timer);
 
     // print headers
-    printf("N, %d blocks one pass, %d blocks multipass\n", maxBlocks, maxBlocks);
+    printf("\nGigaFlops Benchmark\n");
+    printf("N\t\tSinglePass\t\tMultiPass\n");
 
     for (int i = minN; i <= maxN; i *= 2) {
-        printf("%d, ", i);
+        if (i >= 16777216)
+            printf("%d\t", i);
+        else
+            printf("%d\t\t", i);
 
         for (int multiPass = 0; multiPass <= 1; multiPass++) {
             sdkResetTimer(&timer);
@@ -352,8 +356,9 @@ void shmoo(int minN, int maxN, int maxThreads, int maxBlocks)
                             d_idata,
                             d_odata);
 
-            float reduceTime = sdkGetAverageTimerValue(&timer);
-            printf("%f%s", reduceTime, multiPass == 0 ? ", " : "\n");
+            float reduceTime = sdkGetAverageTimerValue(&timer); // in ms
+            float gigaFlops = i * sizeof(float) / (reduceTime / 1000.0f) / 1024.0f / 1024.0f / 1024.0f;
+            printf("%f%s", gigaFlops, multiPass == 0 ? "\t\t" : "\n");
         }
     }
 

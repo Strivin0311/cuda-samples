@@ -54,31 +54,39 @@ template <unsigned int blockSize>
 __device__ void reduceBlock(volatile float *sdata, float mySum, const unsigned int tid, cg::thread_block cta)
 {
     cg::thread_block_tile<32> tile32 = cg::tiled_partition<32>(cta);
-    sdata[tid]                       = mySum;
-    cg::sync(tile32);
 
-    const int VEC = 32;
-    const int vid = tid & (VEC - 1);
+    // sdata[tid]                       = mySum;
+    // cg::sync(tile32);
 
-    float beta = mySum;
-    float temp;
+    float acc = mySum;
 
-    for (int i = VEC / 2; i > 0; i >>= 1) {
-        if (vid < i) {
-            temp = sdata[tid + i];
-            beta += temp;
-            sdata[tid] = beta;
-        }
-        cg::sync(tile32);
+    // reduce the warp sum into lane0's shared memory
+    // float temp;
+    // for (int i = tile32.size() / 2; i > 0; i >>= 1) {
+    //     if (tile32.thread_rank() < i) {
+    //         temp = sdata[tid + i];
+    //         acc += temp;
+    //         sdata[tid] = acc;
+    //     }
+    //     cg::sync(tile32);
+    // }
+
+    for (int stride = tile32.size() / 2; stride > 0; stride >>= 1) {
+        acc += tile32.shfl_down(acc, stride);
     }
+    if (tile32.thread_rank() == 0)
+        sdata[tid] = acc;
+
     cg::sync(cta);
 
+    // the thread0 in the block reduces the block sum from all the partial warp sums
+    // into its own shared memory
     if (cta.thread_rank() == 0) {
-        beta = 0;
-        for (int i = 0; i < blockDim.x; i += VEC) {
-            beta += sdata[i];
+        acc = 0;
+        for (int i = 0; i < blockDim.x; i += warpSize) {
+            acc += sdata[i];
         }
-        sdata[0] = beta;
+        sdata[0] = acc;
     }
     cg::sync(cta);
 }
@@ -110,9 +118,10 @@ __device__ void reduceBlocks(const float *g_idata, float *g_odata, unsigned int 
     }
 
     // do reduction in shared mem
+    // and write the result into sdata[0]
     reduceBlock<blockSize>(sdata, mySum, tid, cta);
 
-    // write result for this block to global mem
+    // thread0 writes result for this block to global mem
     if (tid == 0)
         g_odata[blockIdx.x] = sdata[0];
 }
@@ -134,26 +143,27 @@ cudaError_t setRetirementCount(int retCnt)
     return cudaMemcpyToSymbol(retirementCount, &retCnt, sizeof(unsigned int), 0, cudaMemcpyHostToDevice);
 }
 
-// This reduction kernel reduces an arbitrary size array in a single kernel
-// invocation It does so by keeping track of how many blocks have finished.
-// After each thread block completes the reduction of its own block of data, it
-// "takes a ticket" by atomically incrementing a global counter.  If the ticket
-// value is equal to the number of thread blocks, then the block holding the
-// ticket knows that it is the last block to finish.  This last block is
-// responsible for summing the results of all the other blocks.
+// This reduction kernel reduces an arbitrary size array in a single kernel invocation.
+// It does so by keeping track of how many blocks have finished.
+// After each thread block completes the reduction of its own block of data, 
+// it "takes a ticket" by atomically incrementing a global counter. 
+// If the ticket value is equal to the number of thread blocks, 
+// then the block holding the ticket knows that it is the last block to finish.
+// This last block is responsible for summing the results of all the other blocks.
 //
-// In order for this to work, we must be sure that before a block takes a
-// ticket, all of its memory transactions have completed.  This is what
-// __threadfence() does -- it blocks until the results of all outstanding memory
-// transactions within the calling thread are visible to all other threads.
+// In order for this to work, we must be sure that before a block takes a ticket, 
+// all of its memory transactions have completed.
+// This is what `__threadfence()` does -- it blocks until the results of all 
+// outstanding memory transactions within the calling thread are visible to all other threads.
 //
-// For more details on the reduction algorithm (notably the multi-pass
-// approach), see the "reduction" sample in the CUDA SDK.
+// For more details on the reduction algorithm (notably the multi-pass approach), 
+// see the "reduction" sample in the CUDA SDK.
 template <unsigned int blockSize, bool nIsPow2>
 __global__ void reduceSinglePass(const float *g_idata, float *g_odata, unsigned int n)
 {
     // Handle to thread block group
     cg::thread_block cta = cg::this_thread_block();
+
     //
     // PHASE 1: Process all inputs assigned to this block
     //
@@ -169,15 +179,10 @@ __global__ void reduceSinglePass(const float *g_idata, float *g_odata, unsigned 
         __shared__ bool         amLast;
         extern float __shared__ smem[];
 
-        // wait until all outstanding memory instructions in this thread are
-        // finished
-        __threadfence();
-
         // Thread 0 takes a ticket
         if (tid == 0) {
             unsigned int ticket = atomicInc(&retirementCount, gridDim.x);
-            // If the ticket ID is equal to the number of blocks, we are the last
-            // block!
+            // If the ticket ID is equal to the number of blocks, we are the last block!
             amLast = (ticket == gridDim.x - 1);
         }
 
@@ -188,11 +193,19 @@ __global__ void reduceSinglePass(const float *g_idata, float *g_odata, unsigned 
             int   i     = tid;
             float mySum = 0;
 
+            // since each block's thread0 writes the global memory g_odata[blockIdx.x] in `reduceBlocks` above
+            // we have to use `__threadfence()` here to make sure that all the writes to g_odata are visible to all threads
+            // i.e. flushed from register -> SM's own data L1 cache -> L2 cache -> global memory
+            // before the last block's reduction
+            __threadfence();
+
             while (i < gridDim.x) {
                 mySum += g_odata[i];
                 i += blockSize;
             }
 
+            // reduce the grid sum from all the partial block sums
+            // by the last block
             reduceBlock<blockSize>(smem, mySum, tid, cta);
 
             if (tid == 0) {

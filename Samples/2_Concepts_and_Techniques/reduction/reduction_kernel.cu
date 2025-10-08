@@ -286,7 +286,7 @@ template <class T, unsigned int blockSize> __global__ void reduce4(T *g_idata, T
     cg::sync(cta);
 
     // do reduction in shared mem
-    // NOTE: here s stops at 32, since the last few reduces are left
+    // NOTE: here stops at 32, since the last few reduces are left
     // to the `shuffle_down_sync` operation within the first warp
     // so we don't have to sync all threads in the block while there's only one warp active
     for (unsigned int s = blockDim.x / 2; s > 32; s >>= 1) {

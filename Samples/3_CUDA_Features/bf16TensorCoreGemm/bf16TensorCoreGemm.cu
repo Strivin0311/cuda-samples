@@ -209,7 +209,7 @@ __host__ void init_host_matrices(__nv_bfloat16 *a, __nv_bfloat16 *b, float *c)
 
 __global__ void compute_bf16gemm(const __nv_bfloat16 *A, const __nv_bfloat16 *B, const float *C, float *D, float alpha, float beta) {
 #if __CUDA_ARCH__ >= 800
-    extern __shared__ __nv_bfloat16 shmem[][CHUNK_K * K + SKEW_BF16];
+    extern __shared__ __nv_bfloat16 shmem[][CHUNK_K * K + SKEW_BF16]; // skew 16 __nv_bfloat16 to avoid bank conflict and align to 256-bit
 
     // Warp and lane identification.
     const unsigned int warpId = threadIdx.x / WARP_SIZE;
