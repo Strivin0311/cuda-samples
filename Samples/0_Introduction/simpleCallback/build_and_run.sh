@@ -5,7 +5,7 @@ SEP="--------------------------------------------------------------------"
 BUILD_ROOT=build
 TARGET=simpleCallback
 
-# default not skip any step
+# default not skip any step except profiling
 SKIP_BUILD=false
 SKIP_RUN=false
 SKIP_PROFILE=true
