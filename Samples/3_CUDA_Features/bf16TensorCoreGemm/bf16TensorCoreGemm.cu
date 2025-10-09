@@ -444,8 +444,9 @@ __global__ void compute_bf16gemm_async_copy(const __nv_bfloat16 *A,
     constexpr size_t shmem_idx_b_off = BLOCK_COL_TILES * M;
 
     // This pointer is used to access the C and D matrix tiles this warp computes.
-    float *shmem_warp_tile_ptr = (float *)&shmem[0][0] + warpGroupId * SHMEM_STRIDE * N * BLOCK_ROW_WARPS
-                               + warpIdInGroup * SHMEM_OFFSET;
+    float *shmem_warp_tile_ptr = (float *)&shmem[0][0] 
+                                + warpGroupId * SHMEM_STRIDE * N * BLOCK_ROW_WARPS
+                                + warpIdInGroup * SHMEM_OFFSET;
 
     // This pointer is used to stream the C and D matrices block-wide tile to and from shared memory.
     float *shmem_warp_stream_ptr = (float *)&shmem[0][0] + warpId * SHMEM_STRIDE * N;
@@ -558,12 +559,16 @@ __global__ void compute_bf16gemm_async_copy(const __nv_bfloat16 *A,
             for (int i = 0; i < chunksPerLane; i++) {
                 // Copy 16 bytes at once in each lane.
                 pipe.producer_acquire();
+                
                 cuda::memcpy_async(&shmem[shmem_idx][laneLoadElem], lane_ptr, shape4, pipe);
+                
                 pipe.producer_commit();
+                
                 // Advance the global memory pointer and the shared memory index.
                 lane_ptr = lane_ptr + K_GLOBAL * CHUNK_COPY_LINES_PER_WARP;
                 shmem_idx += CHUNK_COPY_LINES_PER_WARP;
             }
+
             cuda::pipeline_consumer_wait_prior<0>(pipe);
             __syncthreads();
 
@@ -631,7 +636,6 @@ __global__ void compute_bf16gemm_async_copy(const __nv_bfloat16 *A,
                 wmma::store_matrix_sync(tile_ptr, c[i][j], SHMEM_STRIDE, C_LAYOUT);
             }
         }
-
         __syncthreads();
 
         /********** Store D from shared memory to global memory ***********/
@@ -644,7 +648,6 @@ __global__ void compute_bf16gemm_async_copy(const __nv_bfloat16 *A,
             *((copy_t *)(dst_gmem_warp_stream_ptr + GLOBAL_MEM_STRIDE * i) + laneId) =
                 *((copy_t *)(shmem_warp_stream_ptr + SHMEM_STRIDE * i) + laneId);
         }
-
         __syncthreads();
     }
 #endif
