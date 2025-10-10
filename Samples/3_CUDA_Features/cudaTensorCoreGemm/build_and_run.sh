@@ -58,6 +58,7 @@ if [ "$SKIP_RUN" = false ]; then
     echo "$SEP"
     echo "Running ${TARGET}"
     echo "$SEP"
+    
     $CMD
 else
     echo "$SEP"
